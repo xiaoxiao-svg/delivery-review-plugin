@@ -1,0 +1,13 @@
+{
+  "name": "delivery-review-marketplace",
+  "owner": {
+    "name": "xiaoxiao-svg"
+  },
+  "plugins": [
+    {
+      "name": "delivery-review",
+      "source": "./",
+      "description": "基于 git-notes 的双 Agent 交付协作工作流，支持代码审查、质量门禁和交付追踪"
+    }
+  ]
+}

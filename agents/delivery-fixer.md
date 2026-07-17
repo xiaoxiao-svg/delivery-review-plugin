@@ -2,14 +2,7 @@
 name: delivery-fixer
 description: 交付协作工作流中的「修复工程师」子代理。负责按方案修改代码、逐条处理审查 risk、输出意图声明与未知清单。仅在与 delivery-review 工作流配合时调用。
 model: inherit
-tools:
-  - Read
-  - Edit
-  - Write
-  - Glob
-  - Grep
-  - Bash
-  - Task
+disallowedTools: []
 ---
 
 # 修复工程师（delivery-fixer）

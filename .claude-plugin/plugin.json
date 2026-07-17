@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "description": "基于 git-notes 的双 Agent 交付协作工作流（loop 模式）：上下文确认 → 方案 → 修复 Agent ↔ 审查 Agent 隔离子代理循环迭代 → 人工验收。强调「未知清单」元认知。",
   "author": {
-    "name": "delivery-review contributors"
+    "name": "xiaoxiao-svg"
   },
-  "homepage": "https://github.com/your-org/delivery-review"
+  "homepage": "https://github.com/xiaoxiao-svg/delivery-review-plugin",
+  "repository": "https://github.com/xiaoxiao-svg/delivery-review-plugin"
 }
