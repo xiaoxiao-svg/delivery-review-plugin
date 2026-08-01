@@ -18,9 +18,9 @@
 ## 一句话流程
 
 ```
-上下文确认 → 方案 → 目标声明（= 退出标准）
+上下文确认 → 方案（双轨 + 可选）→ 方案审查（大改动时）→ 目标声明（= 退出标准）
   → Loop[ 修复 Agent(delivery-fixer) ↔ 审查 Agent(delivery-reviewer, 隔离只读) ]
-  → 重新输出目标 → 人工验收（不可跳过、不可 AI 代理）
+  → 重新输出目标 → 人工验收（裁决权不可 AI 代理）→ 交付报告（docs/）
 ```
 
 每轮 loop：
@@ -44,7 +44,8 @@ delivery-review/
 ├── skills/delivery-review/SKILL.md    # 方法论 + 数据模型（自动触发 / 参考）
 ├── agents/
 │   ├── delivery-fixer.md              # 修复工程师（读写）
-│   └── delivery-reviewer.md           # 资深审查者（隔离 + 零命令权限）
+│   ├── delivery-reviewer.md           # 资深审查者（隔离 + 零命令权限）
+│   └── delivery-planner.md            # 方案审查者（按需触发，零命令权限）
 ├── commands/delivery-review.md        # /delivery-review 确定性入口
 ├── CLAUDE.md                          # 项目规则书（开发用，不随安装分发）
 ├── LICENSE                            # MIT
@@ -58,7 +59,8 @@ delivery-review/
 | `SKILL.md` | 自动触发的参考知识（交付流程 / 数据模型 / 风险分级 / 证据等级 / dispute 机制） |
 | `delivery-fixer.md` | 修复 agent：按方案改代码、逐条处理 risk、输出意图声明 |
 | `delivery-reviewer.md` | 审查 agent：工具层强制零命令权限、Read 审查材料独立审查、输出分级 risk（带证据等级）+ 质量分 + 收敛判断 |
-| `delivery-review.md` (command) | 确定性入口：强制走 Step 0-4，不跳步 |
+| `delivery-planner.md` | 方案审查 agent（按需触发）：方案确认前从产品视角审查（符合意图？验收可验证？更简替代？代价合理？），结论只呈现用户 |
+| `delivery-review.md` (command) | 确定性入口：强制走 Step 0-5，不跳步 |
 
 ---
 
@@ -101,10 +103,12 @@ claude --plugin-dir /path/to/delivery-review-plugin
 跟着提示走完：
 
 1. **上下文确认**（做什么 / 为什么 / 顾虑） → 不清晰会拒绝退出
-2. **方案**（改哪里 / 影响 / 验证方式） → 等你确认
-3. **目标声明**（= 退出标准，每一条可验证）
-4. **自动 loop**（修复 ↔ 审查，直到收敛 / 质量门 / 震荡 / 上限）
-5. **人工验收**（⚠️ 不可 AI 代理，必须你来）
+2. **方案**（大白话 + 工程细节；有多个可行路径时让你选） → 等你确认
+3. **方案审查**（大改动时自动触发产品视角检查，四项结论由你拍板）
+4. **目标声明**（= 退出标准，每一条可验证）
+5. **自动 loop**（修复 ↔ 审查，直到收敛 / 质量门 / 震荡 / 上限；**你可随时插话**：澄清不重置，改目标则整体重置）
+6. **人工验收**（裁决权必须你行使；可声明 AI 代跑验证并标证据等级）
+7. **交付报告**（自动写入运行项目 `docs/`）
 
 ---
 
