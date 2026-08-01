@@ -10,7 +10,7 @@
 
 | 痛点 | 传统做法 | 本 plugin 的做法 |
 |------|---------|------------------|
-| 子代理隔离靠模型自觉 | skill 里写"请 spawn 子代理"，模型可能跳过 | 修复 / 审查拆成独立 **agent 定义**；`/delivery-review` 用 Task 强制调用；审查者 `disallowedTools` 在**工具层强制只读** |
+| 子代理隔离靠模型自觉 | skill 里写"请 spawn 子代理"，模型可能跳过 | 修复 / 审查拆成独立 **agent 定义**；`/delivery-review` 用 Agent 工具强制调用；审查者 `disallowedTools` 在**工具层强制零命令权限** |
 | loop 循环靠模型记忆 | skill 写 `while True` 伪代码，轮次记不住 | 循环状态外置到 `.delivery-review/state.json`，由**状态机**判收敛 / 质量门 / 震荡，不靠上下文记忆 |
 
 ---
@@ -36,23 +36,30 @@
 
 ```
 delivery-review/
-├── .claude-plugin/plugin.json         # Claude Code plugin 清单
+├── .claude-plugin/
+│   ├── plugin.json                    # Claude Code plugin 清单 + hooks 声明
+│   └── marketplace.json               # 市场源描述
+├── hooks/
+│   └── update-review-material.ps1     # PostToolUse hook：自动生成审查材料
 ├── skills/delivery-review/SKILL.md    # 方法论 + 数据模型（自动触发 / 参考）
 ├── agents/
 │   ├── delivery-fixer.md              # 修复工程师（读写）
-│   └── delivery-reviewer.md           # 资深审查者（隔离 + 只读）
+│   └── delivery-reviewer.md           # 资深审查者（隔离 + 零命令权限）
 ├── commands/delivery-review.md        # /delivery-review 确定性入口
-├── install.ps1                        # Windows 一键安装
+├── install.ps1 / install.bat          # Windows 一键安装（完整携带插件）
+├── uninstall.ps1 / uninstall.bat      # Windows 一键卸载
+├── CLAUDE.md                          # 项目规则书（开发用，不随安装分发）
 ├── LICENSE                            # MIT
 └── README.md                          # 本文件
 ```
 
 | 组件 | 作用 |
 |------|------|
-| `plugin.json` | skills-dir plugin 注册入口，Claude Code 启动自动加载 |
-| `SKILL.md` | 自动触发的参考知识（交付流程 / 数据模型 / 风险分级 / dispute 机制） |
+| `plugin.json` | Claude Code 插件清单 + hooks 声明（PostToolUse 自动生成审查材料）；marketplace `/plugin install` 与本地 `install.ps1` 安装均携带，hooks 对两种安装方式生效 |
+| `hooks/update-review-material.ps1` | PostToolUse hook：每次代码改动后自动刷新 `.delivery-review/review_material.md`（改动清单 / diff / 新建文件清单），供审查者零命令权限审查 |
+| `SKILL.md` | 自动触发的参考知识（交付流程 / 数据模型 / 风险分级 / 证据等级 / dispute 机制） |
 | `delivery-fixer.md` | 修复 agent：按方案改代码、逐条处理 risk、输出意图声明 |
-| `delivery-reviewer.md` | 审查 agent：工具层强制只读、输出分级 risk + 质量分 + 收敛判断 |
+| `delivery-reviewer.md` | 审查 agent：工具层强制零命令权限、Read 审查材料独立审查、输出分级 risk（带证据等级）+ 质量分 + 收敛判断 |
 | `delivery-review.md` (command) | 确定性入口：强制走 Step 0-4，不跳步 |
 | `install.ps1` | 一键装进 `~/.claude/` |
 
@@ -62,7 +69,7 @@ delivery-review/
 
 ### 方式一：双击 install.bat（本地使用，推荐）
 
-双击项目根目录的 `install.bat`，脚本自动把插件复制到 `~/.claude/skills/delivery-review/`，**重启 Claude Code** 即加载。
+双击项目根目录的 `install.bat`，脚本把插件**完整**复制到 `~/.claude/skills/delivery-review/`（含 `.claude-plugin/plugin.json` 与 `hooks/`，审查材料自动生成的 hook 两种安装方式均生效），**重启 Claude Code** 即加载。
 
 若偏好 PowerShell，可在仓库根目录运行：
 
@@ -104,7 +111,7 @@ delivery-review/
 
 ### 手动管理
 
-把 `skills/`、`commands/`、`agents/` 复制进 `~/.claude/skills/delivery-review/` 即加载；删除该目录即卸载。重启 Claude Code 生效。
+把 `.claude-plugin/`、`skills/`、`commands/`、`agents/`、`hooks/` 复制进 `~/.claude/skills/delivery-review/` 即加载（含 hooks 声明，审查材料自动生成生效）；删除该目录即卸载。重启 Claude Code 生效。
 
 > 本仓库是 **skills-dir plugin**：含 `.claude-plugin/plugin.json` 的目录放进 `~/.claude/skills/<name>/` 即自动注册，出现在 `claude plugin list`。
 
@@ -139,7 +146,8 @@ delivery-review/
 
 ## 数据模型
 
-- 对话记录：`git notes --ref=delivery-review`
+- 对话记录：`git notes --ref=delivery-review`（审查者留言由编排者代写——审查者零命令权限）
+- 审查材料：`.delivery-review/review_material.md`，由 PostToolUse hook 自动刷新（改动清单 / 完整 diff / 新建文件清单）
 - 循环状态：`.delivery-review/state.json`
   ```json
   {"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3}
@@ -153,7 +161,7 @@ delivery-review/
 |------|------|------|
 | context | 编排者 | 目标 + 背景 + 方案 |
 | review | 修复方 | 改动说明 + 意图声明 + 自检 + 未知清单 |
-| risk | 审查方 | 问题描述 + 分级 + 质量分 |
+| risk | 审查方 | 问题描述 + 分级 + 证据等级 |
 | done | 修复方 | 对某条 risk 的处理结果 |
 | score | 审查方 | 本轮质量评分 + 收敛判断 |
 | approve | 审查方 | 所有 risk 已解决，建议人工验收 |
@@ -162,6 +170,8 @@ delivery-review/
 | withdraw | 审查方 | 撤回原 risk（误判） |
 
 **风险分级**：P0 阻塞（必须修） / P1 重要（修或说明理由） / P2 建议（可 defer）。
+
+**证据等级**（每条 risk 必带）：已验证（实际运行）/ 可复现（有复现步骤）/ 代码推断（读代码推断）/ 经验猜测（无依据）。P0 必须"已验证 / 可复现"；经验猜测不算 risk，只进**存疑清单**（人工验收时判断），状态机统计排除猜测级。
 
 ---
 

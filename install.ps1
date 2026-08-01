@@ -1,6 +1,6 @@
 ﻿<#
   delivery-review installer (Windows / PowerShell)
-  - Local: robocopy to ~/.claude/skills/delivery-review/
+  - Local: robocopy to ~/.claude/skills/delivery-review/（完整携带 .claude-plugin/plugin.json 与 hooks/，插件 hooks 生效）
   - Market: print the /plugin install command
 #>
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -16,7 +16,7 @@ try {
     Write-Host "已备份旧版 -> $bak"
   }
   New-Item -ItemType Directory -Force -Path $dest | Out-Null
-  robocopy $repo $dest /MIR /XD .git .claude-plugin /XF install.ps1 install.bat uninstall.ps1 uninstall.bat README.md LICENSE /R:3 /W:3 /NDL /NFL /NJH /NJS
+  robocopy $repo $dest /MIR /XD .git .delivery-review /XF install.ps1 install.bat uninstall.ps1 uninstall.bat README.md LICENSE CLAUDE.md .gitignore /R:3 /W:3 /NDL /NFL /NJH /NJS
   Write-Host ""
   Write-Host "本地 skills-dir 安装完成。" -ForegroundColor Green
   Write-Host "  安装位置：$dest" -ForegroundColor Gray

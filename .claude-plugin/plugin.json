@@ -6,5 +6,19 @@
     "name": "xiaoxiao-svg"
   },
   "homepage": "https://github.com/xiaoxiao-svg/delivery-review-plugin",
-  "repository": "https://github.com/xiaoxiao-svg/delivery-review-plugin"
+  "repository": "https://github.com/xiaoxiao-svg/delivery-review-plugin",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$CLAUDE_PLUGIN_ROOT/hooks/update-review-material.ps1\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
 }

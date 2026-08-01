@@ -13,6 +13,10 @@ description: 启动 delivery-review 双 Agent 交付协作 loop（修复 ↔ 审
 ## 初始化（每次必做）
 
 ```bash
+# 0. 前置检查：必须是 git 仓库且有 commit（工作流依赖 git notes）
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "❌ 当前目录不是 git 仓库，delivery-review 依赖 git notes，无法使用。"; exit 1; }
+git rev-parse --verify HEAD >/dev/null 2>&1 || { echo "❌ 仓库还没有任何 commit，请先提交一个初始 commit。"; exit 1; }
+
 # 1. 确保 git ref 存在
 git notes --ref=delivery-review list >/dev/null 2>&1 || git notes --ref=delivery-review add -m "init|system|init|0|delivery-review ref initialized"
 
@@ -24,6 +28,7 @@ fi
 ```
 
 > 状态全部存在 `.delivery-review/state.json` 和 `git notes --ref=delivery-review`。**不要在上下文里记忆轮次**——每轮开头先读 state.json。
+> 审查材料由插件 hook 自动生成：`.delivery-review/review_material.md`（每次 Write/Edit/Bash 改动后自动刷新）。若首次运行发现该文件从未生成，说明插件 hooks 未注册——检查安装方式（marketplace 安装自动生效；本地 skills-dir 安装需用新版 install.ps1 完整复制插件，含 `.claude-plugin/` 与 `hooks/`）。
 
 ---
 
@@ -79,7 +84,7 @@ Loop 退出标准：
 如果标准不准确，请指出。
 ```
 
-用户确认后，写入 git-notes 作为 loop 基准，并把 `state.json` 的 `round` 归零。
+用户确认后，写入 git-notes 作为 loop 基准，**并把 state.json 整体重置为初始状态**（`round=0, consecutive_clean=0, last_score=0, exit_reason=""`，max_rounds 不变），**同时删除旧审查材料** `.delivery-review/review_material.md`（防止上一轮残留材料被误读）。
 
 ---
 
@@ -89,9 +94,9 @@ Loop 退出标准：
 
 ### 3.1 修复阶段 — spawn `delivery-fixer` 子代理
 
-用 Task 工具调用 agent 类型 `delivery-fixer`，prompt 必须包含：
+用 Agent 工具调用 agent 类型 `delivery-fixer`，prompt 必须包含：
 - 任务目标（Step 2 内容）
-- `git notes --ref=delivery-review` 当前全部留言
+- `git notes --ref=delivery-review` 当前全部留言（**并提示：只处理本轮运行产生的留言，忽略历史运行遗留的旧留言**）
 - 本轮角色：首轮=实现改动；后续轮=逐条处理 risk
 
 等待其返回，确认它已把 `review` / `done` / `dispute` 留言写入 git-notes。
@@ -106,21 +111,33 @@ Loop 退出标准：
 → 进入审查...
 ```
 
-### 3.3 审查阶段 — spawn `delivery-reviewer` 子代理（隔离 + 只读）
+### 3.3 审查阶段 — spawn `delivery-reviewer` 子代理（隔离 + 全禁只读）
 
-用 Task 工具调用 agent 类型 `delivery-reviewer`（已在 agent 定义中层级强制只读、隔离），prompt 必须包含：
+**先刷新审查材料（兜底，不依赖 hook）**：编排者自己执行一次材料刷新，保证审查者拿到的材料新鲜：
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>/hooks/update-review-material.ps1" </dev/null >/dev/null 2>&1 || true
+```
+
+> 插件目录解析：本地 skills-dir 安装为 `~/.claude/skills/delivery-review/`；marketplace 安装可用 `claude plugin list` 查看实际路径。路径含空格需保留引号。
+> 正常情况 hook 已在 fixer 每次改动后自动刷新；此步是双保险（hook 失效、用户手动改动、fixer 零改动等场景）。
+
+用 Agent 工具调用 agent 类型 `delivery-reviewer`（agent 定义已工具层强制全禁 Write/Edit/Bash），prompt 必须包含：
 - 任务目标（Step 2 内容）
-- 修复方的 `review` 留言全文（意图 + 自检 + 未知清单）
+- 审查材料路径 `.delivery-review/review_material.md`（让它自行 Read）
+- 当前 git-notes 最大留言 ID（让它编号）
+- 明确"结论写在最终回复文本中，由编排者代写进 git-notes"
 
-等待其返回，确认它已把 `risk` / `score` / `approve` 留言写入 git-notes。
+等待其返回。**编排者从返回文本提取 risk / score / approve / confirm / withdraw 结论，代写进 git-notes**（审查者禁 Bash 无法自行写入；留言 ID 沿用审查者按「最大 ID + 1」开始的编号）。
 
 ### 3.4 编排者更新状态机（关键，必须执行）
 
-读取本轮 reviewer 的 score 留言，解析 `质量评分` 与 `收敛判断`，更新 `.delivery-review/state.json`：
+读取本轮 reviewer 的 score 结论，解析 `质量评分` 与 `收敛判断`，更新 `.delivery-review/state.json`：
 
 ```
 round = round + 1
-本轮 risk 数 / 新增 risk 数 从最新 risk 留言统计
+本轮 risk 数 = 最新 risk 留言中【证据等级 ∈ 已验证/可复现/代码推断】的数量
+              （经验猜测级不算 risk，只进存疑清单，不参与统计）
 if 本轮 risk == 0 或 新增 risk == 0:
     consecutive_clean += 1
 else:
@@ -134,13 +151,17 @@ else:
 否则：继续下一轮（回到 3.1）
 ```
 
+> 注：P0/P1 判定同样只看正式 risk（证据等级为已验证/可复现/代码推断），存疑清单不参与；"新增 risk"指与上一轮 risk 集合相比新提出的（正文不重复）；**无证据等级的 risk 默认按经验猜测处理（只进存疑清单）**。
+
 输出本轮审查结果：
+
 ```
 ━━━ Round N 审查结果 ━━━
 质量评分：N/10
 收敛判断：...
 新增 risk：X 条（P0:a P1:b P2:c）
 审查未知清单：Y 项
+审查方存疑清单：Z 项（不参与统计，人工验收判断）
 状态：继续 → Round N+1 / ✅ 收敛 / ⚠️ 达到上限 / ⚠️ 震荡退出
 ```
 
@@ -156,6 +177,7 @@ Loop 退出后（`state.json.exit_reason` 非空），**重新输出 Step 2 的�
 【Loop 最终状态】总轮数 / 退出原因 / 最终质量评分
 【已解决 risk】逐条
 【未解决 / defer 项】
+【审查方存疑清单】（审查者拿不准的点，含经验猜测，需人工判断）
 【双方未知清单（人工验收重点关注）】
   修复方：...
   审查方：...
