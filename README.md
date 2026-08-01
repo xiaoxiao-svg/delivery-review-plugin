@@ -46,8 +46,6 @@ delivery-review/
 │   ├── delivery-fixer.md              # 修复工程师（读写）
 │   └── delivery-reviewer.md           # 资深审查者（隔离 + 零命令权限）
 ├── commands/delivery-review.md        # /delivery-review 确定性入口
-├── install.ps1 / install.bat          # Windows 一键安装（完整携带插件）
-├── uninstall.ps1 / uninstall.bat      # Windows 一键卸载
 ├── CLAUDE.md                          # 项目规则书（开发用，不随安装分发）
 ├── LICENSE                            # MIT
 └── README.md                          # 本文件
@@ -55,31 +53,16 @@ delivery-review/
 
 | 组件 | 作用 |
 |------|------|
-| `plugin.json` | Claude Code 插件清单 + hooks 声明（PostToolUse 自动生成审查材料）；marketplace `/plugin install` 与本地 `install.ps1` 安装均携带，hooks 对两种安装方式生效 |
+| `plugin.json` | Claude Code 插件清单 + hooks 声明（PostToolUse 自动生成审查材料）；marketplace `/plugin install` 安装时携带，hooks 生效 |
 | `hooks/update-review-material.ps1` | PostToolUse hook：每次代码改动后自动刷新 `.delivery-review/review_material.md`（改动清单 / diff / 新建文件清单），供审查者零命令权限审查 |
 | `SKILL.md` | 自动触发的参考知识（交付流程 / 数据模型 / 风险分级 / 证据等级 / dispute 机制） |
 | `delivery-fixer.md` | 修复 agent：按方案改代码、逐条处理 risk、输出意图声明 |
 | `delivery-reviewer.md` | 审查 agent：工具层强制零命令权限、Read 审查材料独立审查、输出分级 risk（带证据等级）+ 质量分 + 收敛判断 |
 | `delivery-review.md` (command) | 确定性入口：强制走 Step 0-4，不跳步 |
-| `install.ps1` | 一键装进 `~/.claude/` |
 
 ---
 
 ## 安装（仅 Claude Code）
-
-### 方式一：双击 install.bat（本地使用，推荐）
-
-双击项目根目录的 `install.bat`，脚本把插件**完整**复制到 `~/.claude/skills/delivery-review/`（含 `.claude-plugin/plugin.json` 与 `hooks/`，审查材料自动生成的 hook 两种安装方式均生效），**重启 Claude Code** 即加载。
-
-若偏好 PowerShell，可在仓库根目录运行：
-
-```powershell
-.\install.ps1
-```
-
-> 提示：如果提示"因为在此系统上禁止运行脚本"，说明系统执行策略限制了 .ps1，改用双击 `install.bat` 即可绕过。
-
-### 方式二：市场安装（公开分发，推荐）
 
 在 Claude Code 会话中执行：
 
@@ -89,31 +72,21 @@ delivery-review/
 
 安装后即可使用 `/delivery-review` 命令。
 
-## 卸载（仅 Claude Code）
+### 本地开发调试（无需安装）
 
-### 方式一：双击 uninstall.bat（本地使用）
+直接加载仓库目录（session 级，改完代码即时生效，重启后失效）：
 
-双击 `uninstall.bat`，自动删除 `~/.claude/skills/delivery-review/` 及所有 `.bak-*` 备份。
-
-若偏好 PowerShell，可在仓库根目录运行：
-
-```powershell
-.\uninstall.ps1
+```bash
+claude --plugin-dir /path/to/delivery-review-plugin
 ```
 
-### 方式二：市场卸载（公开分发）
+## 卸载
 
 在 Claude Code 会话中执行：
 
 ```
 /plugin uninstall delivery-review@delivery-review-marketplace
 ```
-
-### 手动管理
-
-把 `.claude-plugin/`、`skills/`、`commands/`、`agents/`、`hooks/` 复制进 `~/.claude/skills/delivery-review/` 即加载（含 hooks 声明，审查材料自动生成生效）；删除该目录即卸载。重启 Claude Code 生效。
-
-> 本仓库是 **skills-dir plugin**：含 `.claude-plugin/plugin.json` 的目录放进 `~/.claude/skills/<name>/` 即自动注册，出现在 `claude plugin list`。
 
 ---
 

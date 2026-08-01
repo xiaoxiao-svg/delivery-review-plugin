@@ -1,5 +1,6 @@
 {
   "name": "delivery-review-marketplace",
+  "description": "xiaoxiao-svg 的双 Agent 交付协作工作流：基于 git-notes 的修复↔审查闭环交付插件",
   "owner": {
     "name": "xiaoxiao-svg"
   },
