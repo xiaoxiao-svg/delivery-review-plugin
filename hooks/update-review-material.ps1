@@ -6,6 +6,8 @@
   输入：stdin 单行 JSON（PostToolUse hook 载荷，含 cwd / tool_name）
   兼容：PS 5.1 下 stdin 可能按 GBK 解码导致中文路径乱码，故 cwd 双来源——
         优先 stdin 载荷（字节流 + UTF8 手动解码），解析失败或路径不存在时回退当前工作目录
+  落位：.delivery-review 固定在仓库根目录（git rev-parse --show-toplevel），
+        无论在哪个子目录触发 hook，材料都写到根目录，不在子目录下创建
 #>
 $ErrorActionPreference = "Continue"
 # PS 5.1 捕获原生命令输出（git diff 等）时按 GBK 解码 UTF-8 字节会乱码，先切到 UTF-8
@@ -33,22 +35,27 @@ try {
 if (-not $cwd -or -not (Test-Path $cwd)) { $cwd = (Get-Location).Path }
 if (-not $cwd -or -not (Test-Path $cwd)) { exit 0 }
 
+# 解析仓库根目录，.delivery-review 固定放这里；非 git 仓库直接退出（兼作 git 检测）
+$repoRoot = (& git -C $cwd rev-parse --show-toplevel 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $repoRoot) { exit 0 }
+$repoRoot = $repoRoot.Trim()
+
 try {
-  $dir = Join-Path $cwd ".delivery-review"
+  $dir = Join-Path $repoRoot ".delivery-review"
   if (-not (Test-Path $dir)) {
     try { New-Item -ItemType Directory -Force -Path $dir | Out-Null } catch { exit 0 }
   }
 
   # 工作区有变化才刷新材料（含 untracked）
-  $changed = & git -C $cwd status --porcelain 2>$null
-  if ($LASTEXITCODE -ne 0) { exit 0 }  # 非 git 仓库：什么都不做
+  $changed = & git -C $repoRoot status --porcelain 2>$null
+  if ($LASTEXITCODE -ne 0) { exit 0 }
   if (-not $changed) { exit 0 }        # 无变化：保留旧材料不动
 
-  $headHash = (& git -C $cwd rev-parse --short HEAD 2>$null)
+  $headHash = (& git -C $repoRoot rev-parse --short HEAD 2>$null)
   if ($headHash) { $headHash = $headHash.Trim() }
-  $stat = & git -C $cwd diff HEAD --stat 2>$null
-  $diff = & git -C $cwd diff HEAD 2>$null
-  $untracked = & git -C $cwd ls-files --others --exclude-standard 2>$null
+  $stat = & git -C $repoRoot diff HEAD --stat 2>$null
+  $diff = & git -C $repoRoot diff HEAD 2>$null
+  $untracked = & git -C $repoRoot ls-files --others --exclude-standard 2>$null
 
   $sb = New-Object System.Text.StringBuilder
   [void]$sb.AppendLine("# 审查材料（自动生成，请勿手改）")
@@ -87,7 +94,8 @@ try {
   [System.IO.File]::WriteAllText($materialPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
 } catch {
   try {
-    $dir = Join-Path $cwd ".delivery-review"
+    if (-not $repoRoot) { $repoRoot = $cwd }
+    $dir = Join-Path $repoRoot ".delivery-review"
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     Write-HookLog $dir "hook 异常：$($_.Exception.Message)"
   } catch { }

@@ -15,12 +15,14 @@ disallowedTools:
 ## 输入（由编排者通过 prompt 传入，不要自行假设）
 
 1. **任务目标**（来自工作流 Step 2 的目标声明）
-2. **审查材料路径**：`.delivery-review/review_material.md`——由插件 PostToolUse hook 自动生成，含改动清单、完整 diff、新建文件清单
-3. **当前 git-notes 最大留言 ID**（你输出的留言从 N+1 开始编号，实际写入由编排者代做）
+2. **仓库根目录 REPO_ROOT**（由编排者传入；材料路径是绝对路径，diff 内文件路径以 REPO_ROOT 为基准拼接）
+3. **审查材料路径**：`<REPO_ROOT>/.delivery-review/review_material.md`（绝对路径）——由插件 PostToolUse hook 自动生成，含改动清单、完整 diff、新建文件清单
+4. **当前 git-notes 最大留言 ID**（你输出的留言从 N+1 开始编号，实际写入由编排者代做）
 
 ## 审查材料使用规则
 
-- 先 Read `.delivery-review/review_material.md`，核对头部元信息（生成时间、基线 HEAD），确认材料新鲜且覆盖当前改动
+- 先 Read 审查材料（用编排者给的绝对路径），核对头部元信息（生成时间、基线 HEAD），确认材料新鲜且覆盖当前改动
+- diff 内的文件路径是仓库相对路径（如 `src/foo.ts`），核实代码时用 `REPO_ROOT/` + 相对路径拼成绝对路径再 Read/Grep
 - 材料缺失、过时或明显不完整 → 在最终回复中明确报告编排者，**不要凭空审查**
 - 材料只覆盖 Write/Edit/Bash 工具的改动；MCP 等其他工具的写入不在材料中——发现材料未覆盖的可疑改动，列入未知清单
 - 你可以用 Read/Grep 读取代码文件核实材料内容；**不要尝试执行任何命令**

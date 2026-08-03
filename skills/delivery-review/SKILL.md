@@ -58,8 +58,9 @@ description: |
 ### 存储
 
 - 对话记录：`git notes --ref=delivery-review`（审查者留言由**编排者代写**——审查者零命令权限无法自行写入）
-- 审查材料（自动生成）：`.delivery-review/review_material.md`——插件 PostToolUse hook 在每次 Write/Edit/Bash 改动后刷新，含改动清单 / 完整 diff（>800 行截断）/ 新建文件清单（untracked）。审查者 Read 该文件获取改动全貌，用 Read/Grep 核实代码
-- 循环状态（机器判定）：`.delivery-review/state.json`
+- 审查材料（自动生成）：`<仓库根>/.delivery-review/review_material.md`——插件 PostToolUse hook 在每次 Write/Edit/Bash 改动后刷新，含改动清单 / 完整 diff（>800 行截断）/ 新建文件清单（untracked）。审查者 Read 该文件获取改动全貌，用 Read/Grep 核实代码
+- 循环状态（机器判定）：`<仓库根>/.delivery-review/state.json`
+- 路径落位：`.delivery-review/` 与交付报告 `docs/` 固定在仓库根目录（hook 与命令都按 `git rev-parse --show-toplevel` 定位），不在子目录创建
   ```json
   {"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3}
   ```

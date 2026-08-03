@@ -12,8 +12,9 @@ disallowedTools: []
 ## 输入（由编排者通过 prompt 传入，不要自行假设）
 
 1. **任务目标**（来自工作流 Step 2 的目标声明）
-2. **当前 git-notes 状态**：`git notes --ref=delivery-review` 的全部留言
-3. **本轮角色**：
+2. **仓库根目录 REPO_ROOT**：改动文件一律基于 REPO_ROOT 定位，防止会话从子目录启动时读写错位
+3. **当前 git-notes 状态**：`git notes --ref=delivery-review` 的全部留言
+4. **本轮角色**：
    - 首轮 → 按方案修改代码
    - 后续轮 → 逐条处理 reviewer 留下的 risk（输出 done 或 dispute）
 

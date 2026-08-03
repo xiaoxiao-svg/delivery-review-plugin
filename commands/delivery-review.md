@@ -20,15 +20,23 @@ git rev-parse --verify HEAD >/dev/null 2>&1 || { echo "❌ 仓库还没有任何
 # 1. 确保 git ref 存在
 git notes --ref=delivery-review list >/dev/null 2>&1 || git notes --ref=delivery-review add -m "init|system|init|0|delivery-review ref initialized"
 
-# 2. 确保循环状态文件存在（状态外置，不靠上下文记忆）
-mkdir -p .delivery-review
-if [ ! -f .delivery-review/state.json ]; then
-  echo '{"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3}' > .delivery-review/state.json
+# 2. 解析仓库根目录（.delivery-review 固定存根目录，不在子目录创建）
+REPO_ROOT=$(git rev-parse --show-toplevel)
+[ -n "$REPO_ROOT" ] || { echo "❌ 无法解析仓库根目录，请确认当前目录在 git 仓库内。"; exit 1; }
+cd "$REPO_ROOT" # 辅助归位；但不要依赖 cd——重要路径一律用 $REPO_ROOT 绝对路径
+# 注意：后续每次 Bash 调用都是独立 shell，$REPO_ROOT 不会自动保留——
+# 后续步骤若当前 shell 未定义该变量，先重新执行 REPO_ROOT=$(git rev-parse --show-toplevel)，或直接用实际路径
+
+# 3. 确保循环状态文件存在（状态外置，不靠上下文记忆）
+mkdir -p "$REPO_ROOT/.delivery-review"
+if [ ! -f "$REPO_ROOT/.delivery-review/state.json" ]; then
+  echo '{"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3}' > "$REPO_ROOT/.delivery-review/state.json"
 fi
 ```
 
-> 状态全部存在 `.delivery-review/state.json` 和 `git notes --ref=delivery-review`。**不要在上下文里记忆轮次**——每轮开头先读 state.json。
-> 审查材料由插件 hook 自动生成：`.delivery-review/review_material.md`（每次 Write/Edit/Bash 改动后自动刷新）。若首次运行发现该文件从未生成，说明插件 hooks 未注册——检查安装方式（marketplace 安装自动生效；本地开发调试用 `claude --plugin-dir <插件目录>`）。
+> **路径纪律**：`.delivery-review` 固定存仓库根目录（hook 与命令都按 `git rev-parse --show-toplevel` 定位），从任何子目录启动会话都不在子目录创建。
+> 状态全部存在 `$REPO_ROOT/.delivery-review/state.json` 和 `git notes --ref=delivery-review`。**不要在上下文里记忆轮次**——每轮开头先读 state.json。
+> 审查材料由插件 hook 自动生成：`$REPO_ROOT/.delivery-review/review_material.md`（每次 Write/Edit/Bash 改动后自动刷新）。若首次运行发现该文件从未生成，说明插件 hooks 未注册——检查安装方式（marketplace 安装自动生效；本地开发调试用 `claude --plugin-dir <插件目录>`）。
 
 ---
 
@@ -108,13 +116,13 @@ Loop 退出标准：
 如果标准不准确，请指出。
 ```
 
-用户确认后，写入 git-notes 作为 loop 基准，**并把 state.json 整体重置为初始状态**（`round=0, consecutive_clean=0, last_score=0, exit_reason=""`，max_rounds 不变），**同时删除旧审查材料** `.delivery-review/review_material.md`（防止上一轮残留材料被误读）。
+用户确认后，写入 git-notes 作为 loop 基准，**并把 `$REPO_ROOT/.delivery-review/state.json` 整体重置为初始状态**（`round=0, consecutive_clean=0, last_score=0, exit_reason=""`，max_rounds 不变），**同时删除旧审查材料** `$REPO_ROOT/.delivery-review/review_material.md`（防止上一轮残留材料被误读）。
 
 ---
 
 ## Step 3：Loop 迭代（状态机驱动，强制）
 
-**每轮开始先读取 `.delivery-review/state.json`。** 若 `exit_reason` 非空，跳到 Step 4。
+**每轮开始先读取 `$REPO_ROOT/.delivery-review/state.json`。** 若 `exit_reason` 非空，跳到 Step 4。
 
 ### 用户介入（任意时刻）
 
@@ -132,6 +140,7 @@ Loop 退出标准：
 
 用 Agent 工具调用 agent 类型 `delivery-fixer`，prompt 必须包含：
 - 任务目标（Step 2 内容）
+- **仓库根目录 `REPO_ROOT=$REPO_ROOT`**（改动文件一律基于 REPO_ROOT 定位，防止会话从子目录启动时读写错位）
 - `git notes --ref=delivery-review` 当前全部留言（**并提示：只处理本轮运行产生的留言，忽略历史运行遗留的旧留言**）
 - 本轮角色：首轮=实现改动；后续轮=逐条处理 risk
 
@@ -156,11 +165,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>/hooks/update
 ```
 
 > 插件目录解析：本地开发调试用 `claude --plugin-dir <插件目录>`（目录即仓库路径）；marketplace 安装可用 `claude plugin list` 查看实际路径。路径含空格需保留引号。
-> 正常情况 hook 已在 fixer 每次改动后自动刷新；此步是双保险（hook 失效、用户手动改动、fixer 零改动等场景）。
+> 正常情况 hook 已在 fixer 每次改动后自动刷新；此步是双保险（hook 失效、用户手动改动、fixer 零改动等场景）。hook 内部按仓库根目录定位，材料写入 `$REPO_ROOT/.delivery-review/`，不受本次调用 cwd 影响。
 
 用 Agent 工具调用 agent 类型 `delivery-reviewer`（agent 定义已工具层强制全禁 Write/Edit/Bash），prompt 必须包含：
 - 任务目标（Step 2 内容）
-- 审查材料路径 `.delivery-review/review_material.md`（让它自行 Read）
+- **仓库根目录 `REPO_ROOT=$REPO_ROOT`**（材料路径用绝对路径；diff 内文件路径以 REPO_ROOT 为基准拼接后再 Read/Grep 核实）
+- 审查材料路径 `$REPO_ROOT/.delivery-review/review_material.md`（让它自行 Read）
 - 当前 git-notes 最大留言 ID（让它编号）
 - 明确"结论写在最终回复文本中，由编排者代写进 git-notes"
 
@@ -168,7 +178,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>/hooks/update
 
 ### 3.4 编排者更新状态机（关键，必须执行）
 
-读取本轮 reviewer 的 score 结论，解析 `质量评分` 与 `收敛判断`，更新 `.delivery-review/state.json`：
+读取本轮 reviewer 的 score 结论，解析 `质量评分` 与 `收敛判断`，更新 `$REPO_ROOT/.delivery-review/state.json`：
 
 ```
 round = round + 1
@@ -205,7 +215,7 @@ else:
 
 ## Step 4：重新输出目标 → 人工验收
 
-Loop 退出后（`state.json.exit_reason` 非空），**重新输出 Step 2 的目标声明**，让用户对着目标验收：
+Loop 退出后（`$REPO_ROOT/.delivery-review/state.json` 的 `exit_reason` 字段非空），**重新输出 Step 2 的目标声明**，让用户对着目标验收：
 
 ```
 ━━━ Loop 完成，准备人工验收 ━━━
@@ -234,10 +244,10 @@ Loop 退出后（`state.json.exit_reason` 非空），**重新输出 Step 2 的�
 
 ## Step 5：交付报告（Loop 结束后必做）
 
-无论验收是否通过，把**本轮** git-notes 留言整理为交付报告，写入运行项目的 `docs/` 目录（目录不存在则创建）：
+无论验收是否通过，把**本轮** git-notes 留言整理为交付报告，写入运行项目**根目录**的 `docs/` 目录（`$REPO_ROOT/docs/`，目录不存在则创建）：
 
 ```
-docs/delivery-review-<YYYYMMDD>-<HHmm>.md
+$REPO_ROOT/docs/delivery-review-<YYYYMMDD>-<HHmm>.md
 ```
 
 > 日期格式 `YYYYMMDD`、时间 `HHmm`（24 小时制，分钟级防同日覆盖）。

@@ -55,7 +55,7 @@ delivery-review/
 | 组件 | 作用 |
 |------|------|
 | `plugin.json` | Claude Code 插件清单 + hooks 声明（PostToolUse 自动生成审查材料）；marketplace `/plugin install` 安装时携带，hooks 生效 |
-| `hooks/update-review-material.ps1` | PostToolUse hook：每次代码改动后自动刷新 `.delivery-review/review_material.md`（改动清单 / diff / 新建文件清单），供审查者零命令权限审查 |
+| `hooks/update-review-material.ps1` | PostToolUse hook：每次代码改动后自动刷新 `<仓库根>/.delivery-review/review_material.md`（改动清单 / diff / 新建文件清单），供审查者零命令权限审查；`.delivery-review` 固定存仓库根目录，不在子目录创建 |
 | `SKILL.md` | 自动触发的参考知识（交付流程 / 数据模型 / 风险分级 / 证据等级 / dispute 机制） |
 | `delivery-fixer.md` | 修复 agent：按方案改代码、逐条处理 risk、输出意图声明 |
 | `delivery-reviewer.md` | 审查 agent：工具层强制零命令权限、Read 审查材料独立审查、输出分级 risk（带证据等级）+ 质量分 + 收敛判断 |
@@ -124,8 +124,8 @@ claude --plugin-dir /path/to/delivery-review-plugin
 ## 数据模型
 
 - 对话记录：`git notes --ref=delivery-review`（审查者留言由编排者代写——审查者零命令权限）
-- 审查材料：`.delivery-review/review_material.md`，由 PostToolUse hook 自动刷新（改动清单 / 完整 diff / 新建文件清单）
-- 循环状态：`.delivery-review/state.json`
+- 审查材料：`<仓库根>/.delivery-review/review_material.md`，由 PostToolUse hook 自动刷新（改动清单 / 完整 diff / 新建文件清单）
+- 循环状态：`<仓库根>/.delivery-review/state.json`（`.delivery-review` 固定存仓库根目录，不在子目录创建）
   ```json
   {"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3}
   ```
