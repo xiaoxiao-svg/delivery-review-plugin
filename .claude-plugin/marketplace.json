@@ -7,8 +7,13 @@
   "plugins": [
     {
       "name": "delivery-review",
+      "description": "基于 git-notes 的双 Agent 交付协作工作流，支持代码审查、质量门禁和交付追踪",
+      "author": {
+        "name": "xiaoxiao-svg"
+      },
+      "category": "development",
       "source": "./",
-      "description": "基于 git-notes 的双 Agent 交付协作工作流，支持代码审查、质量门禁和交付追踪"
+      "homepage": "https://github.com/xiaoxiao-svg/delivery-review-plugin"
     }
   ]
 }
