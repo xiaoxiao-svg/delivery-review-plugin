@@ -58,7 +58,7 @@ delivery-review/
 | `hooks/update-review-material.ps1` | PostToolUse hook：每次代码改动后自动刷新 `<仓库根>/.delivery-review/review_material.md`（改动清单 / diff / 新建文件清单），供审查者零命令权限审查；`.delivery-review` 固定存仓库根目录，不在子目录创建 |
 | `SKILL.md` | 自动触发的参考知识（交付流程 / 数据模型 / 风险分级 / 证据等级 / dispute 机制） |
 | `delivery-fixer.md` | 修复 agent：按方案改代码、逐条处理 risk、输出意图声明 |
-| `delivery-reviewer.md` | 审查 agent：工具层强制零命令权限、Read 审查材料独立审查、输出分级 risk（带证据等级）+ 质量分 + 收敛判断 |
+| `delivery-reviewer.md` | 审查 agent：工具层强制零命令权限、Read 审查材料独立审查，两段式（第一性原理本质审查 → 症状审查）+ 对抗自查，输出分级 risk（带证据等级 + 与目标的关系）+ 质量分 + 收敛判断 |
 | `delivery-planner.md` | 方案审查 agent（按需触发）：方案确认前从产品视角审查（符合意图？验收可验证？更简替代？代价合理？），结论只呈现用户 |
 | `delivery-review.md` (command) | 确定性入口：强制走 Step 0-5，不跳步 |
 
@@ -73,6 +73,16 @@ delivery-review/
 ```
 
 安装后即可使用 `/delivery-review` 命令。
+
+### 排查：找不到 agent
+
+若运行时提示 `Agent type 'delivery-reviewer' not found` 等错误，是 Claude Code 插件 agent 的命名空间已知 bug 导致（#36002 / #49713，插件 agent 加载被剥离命名空间前缀）。兜底办法：把三个 agent 文件复制到用户级目录（优先级高于插件 agents）：
+
+```bash
+cp agents/delivery-fixer.md agents/delivery-reviewer.md agents/delivery-planner.md ~/.claude/agents/
+```
+
+注意：副本是快照，插件更新后需重新复制；命令文件已内置「全限定名优先、短名兜底」双写法，多数情况下无需此操作。
 
 ### 本地开发调试（无需安装）
 
@@ -138,7 +148,7 @@ claude --plugin-dir /path/to/delivery-review-plugin
 |------|------|------|
 | context | 编排者 | 目标 + 背景 + 方案 |
 | review | 修复方 | 改动说明 + 意图声明 + 自检 + 未知清单 |
-| risk | 审查方 | 问题描述 + 分级 + 证据等级 |
+| risk | 审查方 | 问题描述 + 分级 + 证据等级 + 与目标的关系（必填） |
 | done | 修复方 | 对某条 risk 的处理结果 |
 | score | 审查方 | 本轮质量评分 + 收敛判断 |
 | approve | 审查方 | 所有 risk 已解决，建议人工验收 |

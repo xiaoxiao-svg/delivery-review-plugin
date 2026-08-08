@@ -88,7 +88,7 @@ fi
 - 方案有歧义（用户确认时提出质疑即视为有歧义）
 - 用户要求
 
-触发时：用 Agent 工具调用 agent 类型 `delivery-planner`（只读，工具层全禁 Write/Edit/Bash），prompt 必须包含：
+触发时：用 Agent 工具调用 agent 类型 `delivery-review:delivery-planner`（若报找不到 agent，改用短名 `delivery-planner`），prompt 必须包含：
 - 用户上下文（Step 0 内容）
 - 方案文本（Step 1 内容，含替代路径）
 - 用户已提出的疑问（如有）
@@ -138,7 +138,7 @@ Loop 退出标准：
 
 ### 3.1 修复阶段 — spawn `delivery-fixer` 子代理
 
-用 Agent 工具调用 agent 类型 `delivery-fixer`，prompt 必须包含：
+用 Agent 工具调用 agent 类型 `delivery-review:delivery-fixer`（若报找不到 agent，改用短名 `delivery-fixer`），prompt 必须包含：
 - 任务目标（Step 2 内容）
 - **仓库根目录 `REPO_ROOT=$REPO_ROOT`**（改动文件一律基于 REPO_ROOT 定位，防止会话从子目录启动时读写错位）
 - `git notes --ref=delivery-review` 当前全部留言（**并提示：只处理本轮运行产生的留言，忽略历史运行遗留的旧留言**）
@@ -167,7 +167,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>/hooks/update
 > 插件目录解析：本地开发调试用 `claude --plugin-dir <插件目录>`（目录即仓库路径）；marketplace 安装可用 `claude plugin list` 查看实际路径。路径含空格需保留引号。
 > 正常情况 hook 已在 fixer 每次改动后自动刷新；此步是双保险（hook 失效、用户手动改动、fixer 零改动等场景）。hook 内部按仓库根目录定位，材料写入 `$REPO_ROOT/.delivery-review/`，不受本次调用 cwd 影响。
 
-用 Agent 工具调用 agent 类型 `delivery-reviewer`（agent 定义已工具层强制全禁 Write/Edit/Bash），prompt 必须包含：
+用 Agent 工具调用 agent 类型 `delivery-review:delivery-reviewer`（若报找不到 agent，改用短名 `delivery-reviewer`；agent 定义已工具层强制全禁 Write/Edit/Bash），prompt 必须包含：
 - 任务目标（Step 2 内容）
 - **仓库根目录 `REPO_ROOT=$REPO_ROOT`**（材料路径用绝对路径；diff 内文件路径以 REPO_ROOT 为基准拼接后再 Read/Grep 核实）
 - 审查材料路径 `$REPO_ROOT/.delivery-review/review_material.md`（让它自行 Read）
