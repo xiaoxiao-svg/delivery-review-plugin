@@ -62,8 +62,26 @@ description: |
 - 循环状态（机器判定）：`<仓库根>/.delivery-review/state.json`
 - 路径落位：`.delivery-review/` 与交付报告 `docs/` 固定在仓库根目录（hook 与命令都按 `git rev-parse --show-toplevel` 定位），不在子目录创建
   ```json
-  {"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3}
+  {
+    "round": 0,
+    "consecutive_clean": 0,
+    "last_score": 0,
+    "exit_reason": "",
+    "max_rounds": 3,
+    "file_mod_counts": {},
+    "last_round_risk_ids": []
+  }
   ```
+
+| 字段 | 类型 | 用途 |
+|------|------|------|
+| `round` | int | 当前轮次 |
+| `consecutive_clean` | int | 连续无新增 risk 轮数（用于 converged 判定） |
+| `last_score` | int | 上一轮质量分（用于 quality_gate 判定） |
+| `exit_reason` | string | 退出原因（空 = 继续） |
+| `max_rounds` | int | 最大轮次上限 |
+| `file_mod_counts` | object | 各文件被修改次数（用于 oscillation 检测，任一文件 ≥ 3 次即触发） |
+| `last_round_risk_ids` | int[] | 上一轮 risk 留言 ID 列表（用于判定新增 risk） |
 
 ### 留言格式
 
@@ -129,6 +147,8 @@ description: |
 4. **max_rounds**：达到 `max_rounds`（默认 3）→ 兜底退出
 
 > risk 数 / 新增 risk / P0/P1 判定均只统计**正式 risk**（证据等级为已验证/可复现/代码推断），存疑清单不参与统计。新增 risk 指与上一轮 risk 集合相比新提出的（正文不重复）。
+>
+> **状态机执行纪律**：oscillation 检测依赖 `file_mod_counts` 字段（任一文件修改 ≥ 3 次即触发），新增 risk 检测依赖 `last_round_risk_ids` 字段（当前轮 risk ID 列表减去上轮列表）。这两个字段在 state.json 中持久化，不依赖 LLM 记忆或心算。编排者每轮必须输出完整的 state update block，包含这两个字段的更新。
 
 ---
 

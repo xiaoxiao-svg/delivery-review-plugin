@@ -30,7 +30,7 @@ cd "$REPO_ROOT" # 辅助归位；但不要依赖 cd——重要路径一律用 $
 # 3. 确保循环状态文件存在（状态外置，不靠上下文记忆）
 mkdir -p "$REPO_ROOT/.delivery-review"
 if [ ! -f "$REPO_ROOT/.delivery-review/state.json" ]; then
-  echo '{"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3}' > "$REPO_ROOT/.delivery-review/state.json"
+  echo '{"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3,"file_mod_counts":{},"last_round_risk_ids":[]}' > "$REPO_ROOT/.delivery-review/state.json"
 fi
 ```
 
@@ -116,7 +116,7 @@ Loop 退出标准：
 如果标准不准确，请指出。
 ```
 
-用户确认后，写入 git-notes 作为 loop 基准，**并把 `$REPO_ROOT/.delivery-review/state.json` 整体重置为初始状态**（`round=0, consecutive_clean=0, last_score=0, exit_reason=""`，max_rounds 不变），**同时删除旧审查材料** `$REPO_ROOT/.delivery-review/review_material.md`（防止上一轮残留材料被误读）。
+用户确认后，写入 git-notes 作为 loop 基准，**并把 `$REPO_ROOT/.delivery-review/state.json` 整体重置为初始状态**（`round=0, consecutive_clean=0, last_score=0, exit_reason="", file_mod_counts={}, last_round_risk_ids=[]`，max_rounds 不变），**同时删除旧审查材料** `$REPO_ROOT/.delivery-review/review_material.md`（防止上一轮残留材料被误读）。
 
 ---
 
@@ -178,26 +178,47 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>/hooks/update
 
 ### 3.4 编排者更新状态机（关键，必须执行）
 
-读取本轮 reviewer 的 score 结论，解析 `质量评分` 与 `收敛判断`，更新 `$REPO_ROOT/.delivery-review/state.json`：
+读取本轮 reviewer 的 score 结论，解析 `质量评分` 与 `收敛判断`，更新 `$REPO_ROOT/.delivery-review/state.json`。**本步必须输出标准化的 state update block，不可省略任何字段**：
 
 ```
 round = round + 1
 本轮 risk 数 = 最新 risk 留言中【证据等级 ∈ 已验证/可复现/代码推断】的数量
               （经验猜测级不算 risk，只进存疑清单，不参与统计）
+本轮 risk ID 列表 = 本轮所有正式 risk 的留言 ID（用于下一轮对比新增）
+新增 risk 数 = 本轮 risk ID 列表 - last_round_risk_ids 的差集大小
 if 本轮 risk == 0 或 新增 risk == 0:
     consecutive_clean += 1
 else:
     consecutive_clean = 0
 
+# 文件修改计数（用于振荡检测）
+从 review_material.md 读取本轮改动文件列表，更新 file_mod_counts：
+  每个被修改的文件计数 +1（新文件从 1 开始）
+
+# 质量分更新
+last_score = 本轮 score
+
 退出判定（按优先级）：
-1. 同一文件被反复修改 ≥ 3 次，或 dispute 未解决 → exit_reason="oscillation"/"dispute"，强制退出
+1. 任一文件 file_mod_counts >= 3，或 dispute 未解决 → exit_reason="oscillation"/"dispute"，强制退出
 2. consecutive_clean >= 2 → exit_reason="converged"
 3. last_score >= 7 且无 P0/P1 → exit_reason="quality_gate"
 4. round >= max_rounds(3) → exit_reason="max_rounds"
 否则：继续下一轮（回到 3.1）
+
+# 写回 state.json（必须包含全部字段）
+{
+  "round": round,
+  "consecutive_clean": consecutive_clean,
+  "last_score": last_score,
+  "exit_reason": exit_reason,
+  "max_rounds": max_rounds,
+  "file_mod_counts": { ... },        // 全量，不省略
+  "last_round_risk_ids": [ ... ]     // 本轮 risk ID 列表
+}
 ```
 
 > 注：P0/P1 判定同样只看正式 risk（证据等级为已验证/可复现/代码推断），存疑清单不参与；"新增 risk"指与上一轮 risk 集合相比新提出的（正文不重复）；**无证据等级的 risk 默认按经验猜测处理（只进存疑清单）**。
+> **状态机执行纪律**：每轮必须输出完整的 state update block，包含 file_mod_counts 和 last_round_risk_ids 的更新，不可依赖 LLM 记忆或心算。
 
 输出本轮审查结果：
 
