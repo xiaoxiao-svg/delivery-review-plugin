@@ -12,14 +12,17 @@
 |------|---------|------------------|
 | 子代理隔离靠模型自觉 | skill 里写"请 spawn 子代理"，模型可能跳过 | 修复 / 审查拆成独立 **agent 定义**；`/delivery-review` 用 Agent 工具强制调用；审查者 `disallowedTools` 在**工具层强制零命令权限** |
 | loop 循环靠模型记忆 | skill 写 `while True` 伪代码，轮次记不住 | 循环状态外置到 `.delivery-review/state.json`，由**状态机**判收敛 / 质量门 / 震荡，不靠上下文记忆 |
+| 小改动被大仪式拖慢 | 1 分钟能改完的活走全套审查流程，20 分钟才交付 | **风险分级路由**：hook 机械化判定 trivial/standard/critical；trivial 快车道（一次确认 + 主会话直改 + 轻量审查一轮定音）；分级规则在 hook 代码里，不在提示词里 |
+| 审查过程黑箱，无法溯源 | 子代理上下文销毁后，"看了什么、凭什么判 risk"蒸发 | **溯源链四层**：对话实录（git-notes）→ 审查轨迹（review.log，审查者每轮必输出）→ 材料快照（work/material-rN.md，字节级留存每轮现场）→ git diff 基线 |
 
 ---
 
 ## 一句话流程
 
 ```
-上下文确认 → 方案（双轨 + 可选）→ 方案审查（大改动时）→ 目标声明（= 退出标准）
-  → Loop[ 修复 Agent(delivery-fixer) ↔ 审查 Agent(delivery-reviewer, 隔离只读) ]
+上下文确认 → 方案（双轨 + 可选 + 预估档位）→ 方案审查（大改动时）→ 目标声明（= 退出标准）
+  → Loop[ 修复 Agent(delivery-fixer) ↔ 审查 Agent(delivery-reviewer, 隔离只读) ]   ← standard/critical
+  → 或 trivial 快车道[ 主会话直改 → 轻量审查一轮定音 ]
   → 重新输出目标 → 人工验收（裁决权不可 AI 代理）→ 交付报告（docs/）
 ```
 
@@ -55,10 +58,10 @@ delivery-review/
 | 组件 | 作用 |
 |------|------|
 | `plugin.json` | Claude Code 插件清单 + hooks 声明（PostToolUse 自动生成审查材料）；marketplace `/plugin install` 安装时携带，hooks 生效 |
-| `hooks/update-review-material.ps1` | PostToolUse hook：每次代码改动后自动刷新 `<仓库根>/.delivery-review/review_material.md`（改动清单 / diff / 新建文件清单），供审查者零命令权限审查；`.delivery-review` 固定存仓库根目录，不在子目录创建 |
-| `SKILL.md` | 自动触发的参考知识（交付流程 / 数据模型 / 风险分级 / 证据等级 / dispute 机制） |
+| `hooks/update-review-material.ps1` | PostToolUse hook：每次代码改动后自动刷新 `<仓库根>/.delivery-review/work/material.md`（头部含**机械化风险分级 tier**，正文含改动清单 / diff / 新建文件清单），供审查者零命令权限审查；`.delivery-review` 固定存仓库根目录，不在子目录创建 |
+| `SKILL.md` | 自动触发的参考知识（交付流程 / 数据模型 / 风险分级路由 / 溯源链 / 证据等级 / dispute 机制） |
 | `delivery-fixer.md` | 修复 agent：按方案改代码、逐条处理 risk、输出意图声明 |
-| `delivery-reviewer.md` | 审查 agent：工具层强制零命令权限、Read 审查材料独立审查，两段式（第一性原理本质审查 → 症状审查）+ 对抗自查，输出分级 risk（带证据等级 + 与目标的关系）+ 质量分 + 收敛判断 |
+| `delivery-reviewer.md` | 审查 agent：工具层强制零命令权限、Read 审查材料独立审查，按 tier 选深度（trivial 轻量模板 / standard·critical 两段式：第一性原理本质审查 → 症状审查）+ 对抗自查，输出分级 risk（带证据等级 + 与目标的关系）+ **审查轨迹（供溯源）** + 质量分 + 收敛判断 |
 | `delivery-planner.md` | 方案审查 agent（按需触发）：方案确认前从产品视角审查（符合意图？验收可验证？更简替代？代价合理？），结论只呈现用户 |
 | `delivery-review.md` (command) | 确定性入口：强制走 Step 0-5，不跳步 |
 
@@ -126,18 +129,52 @@ claude --plugin-dir /path/to/delivery-review-plugin
 
 1. **oscillation / dispute 未解** → 强制退出，人工裁决
 2. **converged**：连续两轮 `risk==0` 或 `新增 risk==0` → 理想退出
-3. **quality_gate**：`质量分 >= 7` 且无 P0/P1 → 次优退出
+3. **quality_gate**：`质量分 >= 7` 且无 P0/P1 → 次优退出（**首轮满足即当轮退出**，不为凑 converged 空转第二轮）
 4. **max_rounds**：达到上限（默认 3） → 兜底退出
+
+---
+
+## 风险分级路由（tier）
+
+审查深度与变更风险对价——1 分钟能改完的活不该走 20 分钟的仪式：
+
+| tier | 判定（hook 机械化，LLM 不参与） | 流程 |
+|------|------|------|
+| trivial | 文件 ≤2 且 diff ≤30 行且不触碰关键路径（hooks/、CI、auth、migration、security 等） | **快车道**：Step 0/1/2 一次确认 → 主会话直改（不 spawn fixer）→ reviewer 轻量模板一轮定音 → 精简验收；不生成独立报告 |
+| standard | 其余 | 完整流程 |
+| critical | 触碰关键路径或文件 >5 或 diff >300 行 | 完整流程；以 max_rounds 兜底退出时报告显著标注，人工验收从严 |
+
+**两级判定，不一致从严**：入口由编排者预估 + 用户选择（路由建议）；出口由 hook 按实际改动机械判定写进材料头部——预估 trivial 实际 standard/critical → 自动升级完整流程。分级规则在 hook 代码里，不依赖提示词自觉、不随上下文压缩失忆。
+
+---
+
+## 溯源链（可观测性四层）
+
+子代理上下文销毁后过程即蒸发——隔离买来无污染视角，可观测性作为对价显式补回：
+
+```
+交付报告
+ ├─ 对话实录      ← 谁说了什么（git-notes，报告中原样渲染）
+ ├─ 审查轨迹      ← 凭什么这么说（reviewer 每轮必输出 → 编排者落盘 review.log）
+ ├─ 材料快照索引  ← 当时看到的是什么（work/material-rN.md，字节级留存每轮现场）
+ └─ git 锚点      ← 基线 HEAD → 终态 diff 随时可复核
+```
+
+> 材料每轮被 hook 覆盖，中间状态没有 commit 可回放——快照是中间态的唯一留存。快车道同样留痕（轻量轨迹 + 快照），可观测性不分档。
+>
+> 心智边界：`.delivery-review/` 下人只看 `state.json`（状态）与 `review.log`（审查历史）；材料、快照、hook 日志都在 `work/` 机器工作区内，人的溯源入口是交付报告。
 
 ---
 
 ## 数据模型
 
 - 对话记录：`git notes --ref=delivery-review`（审查者留言由编排者代写——审查者零命令权限）
-- 审查材料：`<仓库根>/.delivery-review/review_material.md`，由 PostToolUse hook 自动刷新（改动清单 / 完整 diff / 新建文件清单）
+- 审查材料：`<仓库根>/.delivery-review/work/material.md`，由 PostToolUse hook 自动刷新（头部元信息：生成时间 / 基线 HEAD / **风险分级 tier**；正文：改动清单 / 完整 diff / 新建文件清单）
+- 审查材料快照：`work/material-rN.md`（每轮审查前由编排者复制，字节级留存）
+- 审查日志：`review.log`（**事件流式纯文本，无 markdown**——每条事件一行，ISO 8601 时间戳打头 + 符号标记 ▶/✔/✖，done 行后跟缩进载荷：证据 / 覆盖 / 轨迹原样粘贴，tail/grep 友好）
 - 循环状态：`<仓库根>/.delivery-review/state.json`（`.delivery-review` 固定存仓库根目录，不在子目录创建）
   ```json
-  {"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3}
+  {"round":0,"consecutive_clean":0,"last_score":0,"exit_reason":"","max_rounds":3,"file_mod_counts":{},"last_round_risk_ids":[],"started_at":"2026-08-28T15:04:05"}
   ```
 
 ```

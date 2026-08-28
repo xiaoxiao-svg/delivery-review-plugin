@@ -1,9 +1,11 @@
 ---
 name: delivery-review
 description: |
-  基于 git-notes 的双 Agent 交付协作工作流（loop 模式）。
+  基于 git-notes 的双 Agent 交付协作工作流（loop 模式），按风险分级路由。
   当用户说"交付"、"审查"、"review"、"验收"、"完成任务"、"检查改动"、"code-review"时激活。
-  流程：上下文确认 → 方案（双轨+用户选择）→ 方案审查（大改动按需）→ 修复 Agent(delivery-fixer) ↔ 审查 Agent(delivery-reviewer，隔离只读)循环迭代 → 人工验收（裁决权归用户）→ 交付报告。
+  流程：上下文确认 → 方案（双轨+用户选择，大改动含产品视角审查）→ 修复 Agent(delivery-fixer) ↔ 审查 Agent(delivery-reviewer，隔离只读)循环迭代 → 人工验收（裁决权归用户）→ 交付报告。
+  分级路由：trivial 快车道（一次确认+主会话直改+轻量审查，hook 机械校验兜底）；standard/critical 完整流程。
+  溯源链：对话实录（git-notes）→ 审查轨迹（review.log）→ 材料快照（work/material-rN.md）→ git diff 基线，四层可回查。
   核心元认知：你不知道远比你知道的要重要的多——AI 必须声明哪些是确定的、哪些不确定、哪些根本没检查到。
   注意：执行请走 /delivery-review 命令，它用状态机强制闭环；本 skill 提供方法论与数据模型参考。
 ---
@@ -45,7 +47,7 @@ description: |
 | 角色 | 执行者 | 权限 | 职责 |
 |------|--------|------|------|
 | 修复工程师 | `delivery-fixer` 子代理 | 读写代码 | 改代码、自检、处理 risk |
-| 资深审查者 | `delivery-reviewer` 子代理 | **零命令权限（工具层禁止 Write/Edit/Bash）** | 两段式独立审查（第一性原理本质审查 → 症状审查）、报 risk（带证据等级 + 与目标的关系）、对抗自查、打分、确认收敛 |
+| 资深审查者 | `delivery-reviewer` 子代理 | **零命令权限（工具层禁止 Write/Edit/Bash）** | 按分级选择深度的独立审查（trivial 轻量模板 / standard·critical 两段式：第一性原理本质审查 → 症状审查）、报 risk（带证据等级 + 与目标的关系）、对抗自查、输出审查轨迹（供溯源）、打分、确认收敛 |
 | 方案审查者 | `delivery-planner` 子代理（按需触发） | **零命令权限（工具层禁止 Write/Edit/Bash）** | 方案输出后、用户确认前，从产品视角审查方案（四项检查），结论只呈现用户，不进 git-notes |
 | 编排者 | 主 Agent / `/delivery-review` | 读写 + spawn | 确认上下文、输出方案与目标、驱动 loop、裁决、代写审查者留言、人工验收、生成交付报告 |
 
@@ -55,12 +57,37 @@ description: |
 
 ## 通信机制与数据模型
 
-### 存储
+### 存储（心智边界：机器工作台 vs 人的入口）
 
-- 对话记录：`git notes --ref=delivery-review`（审查者留言由**编排者代写**——审查者零命令权限无法自行写入）
-- 审查材料（自动生成）：`<仓库根>/.delivery-review/review_material.md`——插件 PostToolUse hook 在每次 Write/Edit/Bash 改动后刷新，含改动清单 / 完整 diff（>800 行截断）/ 新建文件清单（untracked）。审查者 Read 该文件获取改动全貌，用 Read/Grep 核实代码
-- 循环状态（机器判定）：`<仓库根>/.delivery-review/state.json`
+`.delivery-review/` 是机器工作台。**人只需要认识两个文件**，其余不用打开：
+
+```
+.delivery-review/
+├── state.json            ← 人：瞄一眼状态（轮次/分数/退出原因）
+├── review.log            ← 人：看审查历史（纯文本 append，tail/grep 友好）
+└── work/                 ← 机器工作区，人不打开
+    ├── material.md           hook 覆盖写：当前审查材料（给审查者子代理读）
+    ├── material-rN.md        编排者复制：每轮材料快照（溯源用）
+    └── hook.log              hook 异常日志（低频）
+```
+
+人的完整溯源入口是**交付报告**（`docs/delivery-review-*.md`）——报告已把对话实录、审查轨迹、快照索引组织成可读形式，不需要人翻工作目录。
+
+- `state.json`：循环状态（机器判定），字段见下表
+- `review.log`（**事件流式纯文本日志，无 markdown**）：每条事件一行，ISO 8601 时间戳打头 + 符号标记（▶ 开始 / ✔ 通过 / ✖ 有 risk），可排序可 grep；done 事件行后跟缩进载荷行（属同一时间点，不重复时间戳）。编排者在快照后写 begin、审查返回后写 done（两条时间戳相减即该轮审查耗时）：
+  ```
+  [2026-08-28T15:04:05+0800] ▶ ROUND 1 begin | tier=trivial | snapshot=work/material-r1.md
+  [2026-08-28T15:05:12+0800] ✔ ROUND 1 done | score=8/10 | risk=0 (P0:0 P1:0 P2:0) | verdict=approve
+      evidence: src/foo.ts:42 via Read; src/bar.ts:12 via Grep
+      coverage: essence=ok bug=ok edge=ok regress=ok test=miss(no-runtime) refactor=ok deviate=ok
+      tier-match: yes
+      track: <审查者轨迹原文逐行原样>
+  ---
+  ```
+- `work/material.md`：PostToolUse hook 在每次 Write/Edit/Bash 改动后覆盖刷新，头部元信息含生成时间 / 基线 HEAD / **风险分级 tier（hook 机械化判定）**，正文含改动清单 / 完整 diff（>800 行截断）/ 新建文件清单（untracked）。审查者 Read 该文件获取改动全貌，用 Read/Grep 核实代码
+- `work/material-rN.md`：每轮审查前由编排者复制留存——材料本身会被覆盖，快照是中间状态的唯一留存（字节级溯源锚点）
 - 路径落位：`.delivery-review/` 与交付报告 `docs/` 固定在仓库根目录（hook 与命令都按 `git rev-parse --show-toplevel` 定位），不在子目录创建
+- 对话记录：`git notes --ref=delivery-review`（审查者留言由**编排者代写**——审查者零命令权限无法自行写入）
   ```json
   {
     "round": 0,
@@ -69,7 +96,8 @@ description: |
     "exit_reason": "",
     "max_rounds": 3,
     "file_mod_counts": {},
-    "last_round_risk_ids": []
+    "last_round_risk_ids": [],
+    "started_at": "2026-08-28T15:04:05"
   }
   ```
 
@@ -82,6 +110,7 @@ description: |
 | `max_rounds` | int | 最大轮次上限 |
 | `file_mod_counts` | object | 各文件被修改次数（用于 oscillation 检测，任一文件 ≥ 3 次即触发） |
 | `last_round_risk_ids` | int[] | 上一轮 risk 留言 ID 列表（用于判定新增 risk） |
+| `started_at` | string | 本次运行开始时间（交付报告计算总耗时；每轮时间戳在 review.log） |
 
 ### 留言格式
 
@@ -104,6 +133,12 @@ description: |
 | `context` | 编排者 | 目标 + 背景 + 方案 |
 | `review` | 修复方 | 改动说明 + 意图声明 + 自检 + 未知清单 |
 | `risk` | 审查方 | 问题描述 + 分级 + 证据等级 + 与目标的关系（必填） |
+| `done` | 修复方 | 对某条 risk 的处理结果 |
+| `score` | 审查方 | 本轮质量评分 + 收敛判断 |
+| `approve` | 审查方 | 所有 risk 已解决，建议人工验收 |
+| `dispute` | 修复方 | 对某条 risk 的反驳（附理由） |
+| `confirm` | 审查方 | 收到 dispute 后自我核查结果（仍坚持） |
+| `withdraw` | 审查方 | 撤回原 risk（误判） |
 
 ### 两段式审查（第一性原理，delivery-reviewer 强制）
 
@@ -111,12 +146,6 @@ description: |
 2. **症状审查**：bug / 边界 / 回归 / 测试 / 超范围重构 / 偏离目标（原六项）
 3. **对抗自查（每轮必做）**：对每条正式 risk 三问——反证（修了目标真会达成吗）/ 根因（是因还是果）/ 目标本身（是否可验证）；P0/P1 额外给「fixer 可能的反驳 + 为何仍坚持」
 4. **「与目标的关系」填不出** = 非本质问题，降 P2 或进存疑清单
-| `done` | 修复方 | 对某条 risk 的处理结果 |
-| `score` | 审查方 | 本轮质量评分 + 收敛判断 |
-| `approve` | 审查方 | 所有 risk 已解决，建议人工验收 |
-| `dispute` | 修复方 | 对某条 risk 的反驳（附理由） |
-| `confirm` | 审查方 | 收到 dispute 后自我核查结果（仍坚持） |
-| `withdraw` | 审查方 | 撤回原 risk（误判） |
 
 ### 证据等级（risk 必带字段）
 
@@ -139,6 +168,35 @@ description: |
 
 ---
 
+## 风险分级路由（审查深度与风险对价）
+
+固定开销（多次确认 / 子代理冷启动 / 两段式全套 / 独立报告）对大改动是保险费，对小改动是纯税——**1 分钟的改动不该走 20 分钟的仪式**。分级让深度随风险伸缩：
+
+| tier | 判定（hook 机械化，LLM 不参与） | 流程 |
+|------|------|------|
+| trivial | 文件 ≤2 且 diff ≤30 行且不触碰关键路径 | 一次确认 / 主会话直改不 spawn fixer / reviewer 轻量模板一轮定音 / 精简验收 / 不生成独立报告 |
+| standard | 其余 | 完整流程 |
+| critical | 触碰关键路径（hooks/、CI、auth、migration、security 等）或文件 >5 或 diff >300 行 | 完整流程；若最终以 max_rounds 兜底退出，交付报告【流程档位】必须显著标注「critical 级未收敛退出」，人工验收从严 |
+
+**两级判定，不一致从严**：
+- 入口（Step 1）：编排者给预估档位，用户可选快车道——这是路由建议，靠用户在环把关
+- 出口（Step 3.0）：hook 按实际改动机械判定 tier 写进材料头部——预估 trivial 实际 standard/critical → 自动升级完整流程，轮次重计。**分级规则在 hook 代码里，不依赖提示词自觉，永不在上下文压缩中失忆**
+
+**可观测性不分档**：快车道同样落盘审查轨迹（轻量版）与材料快照——深度可以降，留痕和边界声明不可省，否则快车道就是黑箱快速通道。
+
+## 可观测性与溯源（隔离的对价：过程必须结构化带出来）
+
+子代理是销毁式上下文——审查者看了什么、凭什么判 risk，随子代理结束蒸发，编排者只拿到结论。隔离买来无污染视角，**可观测性必须作为对价显式补回**，否则人工复核断链。四个留存层：
+
+| 层 | 载体 | 回答的问题 |
+|----|------|-----------|
+| 对话实录 | git-notes（交付报告中原样渲染） | 谁说了什么：risk 怎么提出、fixer 怎么回应、dispute 怎么收场 |
+| 审查轨迹 | review.log（审查者每轮必输出，编排者原样落盘） | 凭什么这么说：实际 Read/Grep 过的 文件:行号、维度覆盖 ✅/⚠️/🔍、实际风险与分级是否相符 |
+| 材料快照 | work/material-rN.md（审查前编排者复制） | 当时看到的是什么：材料每轮被 hook 覆盖，中间状态没有 commit 可回放，不快照即永久丢失 |
+| git 锚点 | 基线 HEAD → 终态 diff | 终态复核：交付完随时可 diff 对照 |
+
+机制约束：审查者保持零写权限，日志由编排者代写（与 git-notes 代写同构）——**留痕需求不松动物理边界**。审查轨迹里的核实位置必须真实（它就是「代码推断」级证据的出处），没有轨迹的审查结论无效。
+
 ## Loop 退出条件（由 state.json 状态机判定，优先级从高到低）
 
 1. **oscillation / dispute 未解** → 强制退出，移交人工裁决
@@ -147,6 +205,8 @@ description: |
 4. **max_rounds**：达到 `max_rounds`（默认 3）→ 兜底退出
 
 > risk 数 / 新增 risk / P0/P1 判定均只统计**正式 risk**（证据等级为已验证/可复现/代码推断），存疑清单不参与统计。新增 risk 指与上一轮 risk 集合相比新提出的（正文不重复）。
+>
+> **首轮即退**：quality_gate 在首轮即可满足——首轮无 risk 且 score ≥ 7 就当轮退出，不为凑 converged（连续两轮）空转第二轮。
 >
 > **状态机执行纪律**：oscillation 检测依赖 `file_mod_counts` 字段（任一文件修改 ≥ 3 次即触发），新增 risk 检测依赖 `last_round_risk_ids` 字段（当前轮 risk ID 列表减去上轮列表）。这两个字段在 state.json 中持久化，不依赖 LLM 记忆或心算。编排者每轮必须输出完整的 state update block，包含这两个字段的更新。
 
@@ -195,7 +255,9 @@ description: |
 
 ## 交付报告
 
-Loop 结束后（无论验收结果），编排者把**本轮**留言整理为交付报告写入运行项目 `docs/delivery-review-<日期>-<HHmm>.md`：目标 / 方案（含用户选择）/ 轮次摘要 / 已解决与未解决 risk / 存疑清单 / 未知清单 / 验收结论（未通过则标注原因与待办）/ AI 代验结果（如有）。报告是否提交 git 由用户决定。
+Loop 结束后（无论验收结果），编排者把**本轮**留言整理为交付报告写入运行项目 `docs/delivery-review-<日期>-<HHmm>.md`：目标 / 方案（含用户选择）/ 流程档位 / 轮次摘要 / 已解决与未解决 risk / 存疑清单 / 未知清单 / **对话实录（本轮全部留言原样渲染）** / **审查轨迹汇总（引用 review.log）** / **材料快照索引** / 运行耗时 / 验收结论（未通过则标注原因与待办）/ AI 代验结果（如有）。报告是否提交 git 由用户决定。
+
+> trivial 快车道不生成独立报告文件——review.log 条目 + git-notes 即交付记录，精简验收呈现时附两者路径。
 
 ---
 
