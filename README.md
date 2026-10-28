@@ -11,7 +11,7 @@
 | 痛点 | 传统做法 | 本 plugin 的做法 |
 |------|---------|------------------|
 | 子代理隔离靠模型自觉 | skill 里写"请 spawn 子代理"，模型可能跳过 | 修复 / 审查拆成独立 **agent 定义**；`/delivery-review` 用 Agent 工具强制调用；审查者 `disallowedTools` 在**工具层强制零命令权限** |
-| loop 循环靠模型记忆 | skill 写 `while True` 伪代码，轮次记不住 | 循环状态外置到 `.delivery-review/state.json`，由**状态机**判收敛 / 质量门 / 震荡，不靠上下文记忆 |
+| loop 循环靠模型记忆 | skill 写 `while True` 伪代码，轮次记不住 | 循环状态外置到 `.delivery-review/state.json`，由**状态机**判质量门 / 卡死 / 上限，不靠上下文记忆 |
 | 小改动被大仪式拖慢 | 1 分钟能改完的活走全套审查流程，20 分钟才交付 | **风险分级路由**：hook 机械化判定 trivial/standard/critical；trivial 快车道（一次确认 + 主会话直改 + 轻量审查一轮定音）；分级规则在 hook 代码里，不在提示词里 |
 | 审查过程黑箱，无法溯源 | 子代理上下文销毁后，"看了什么、凭什么判 risk"蒸发 | **溯源链四层**：对话实录（git-notes）→ 审查轨迹（review.log，审查者每轮必输出）→ 材料快照（work/material-rN.md，字节级留存每轮现场）→ git diff 基线 |
 
@@ -29,7 +29,7 @@
 每轮 loop：
 1. **修复**：按目标或按 risk 改代码，输出 `review` 留言（意图声明 + **验证证据（命令与输出）** + 自检 + 未知清单）
 2. **审查**：独立只读审查，输出 `risk`（分级 P0/P1/P2）+ `score`（1-10）+ 收敛判断
-3. **状态机**：自动判`质量门（收敛）/ 震荡 / 达到上限`，决定继续还是退出
+3. **状态机**：自动判`质量门（收敛）/ 卡死（stalled）/ 无进展 / 达到上限`，决定继续还是退出
 
 **退出后**：重新输出初始目标 → 你对照验收 → 不通过再跑一轮
 
@@ -119,7 +119,7 @@ claude --plugin-dir /path/to/delivery-review-plugin
 2. **方案**（大白话 + 工程细节；有多个可行路径时让你选） → 等你确认
 3. **方案审查**（大改动时自动触发产品视角检查，四项结论由你拍板）
 4. **目标声明**（= 退出标准，每一条可验证）
-5. **自动 loop**（修复 ↔ 审查，直到质量门（收敛）/ 震荡 / 上限；**你可随时插话**：澄清不重置，改目标则整体重置）
+5. **自动 loop**（修复 ↔ 审查，直到质量门（收敛）/ 卡死 / 上限；**你可随时插话**：澄清不重置，改目标则整体重置）
 6. **人工验收**（裁决权必须你行使；可声明 AI 代跑验证并标证据等级）
 7. **交付报告**（自动写入运行项目 `docs/`）
 
@@ -127,9 +127,13 @@ claude --plugin-dir /path/to/delivery-review-plugin
 
 ## Loop 退出条件（状态机，优先级从高到低）
 
-1. **oscillation / dispute 未解** → 强制退出，人工裁决
-2. **quality_gate**：无未解决的**本次引入** P0/P1 与既有 P0（`open_risk_ids` 为空）且 `质量分 >= 7` → 正常退出（**首轮满足即当轮退出**，不空转第二轮）
-3. **max_rounds**：达到上限（默认 3） → 兜底退出
+1. **dispute 未解** → 强制退出，人工裁决
+2. **stalled**：本轮与上轮工作区全等，但还有未解决的阻塞项 → 没进展且活没干完，强制人工裁决
+3. **no_progress**：本轮与上轮工作区全等，且阻塞项清零、分数达标 → 正常收口（行为同质量门，仅报表区分）
+4. **quality_gate**：无未解决的**本次引入** P0/P1 与既有 P0（`open_risk_ids` 为空）且 `质量分 >= 7` → 正常退出（**首轮满足即当轮退出**，不空转第二轮）
+5. **max_rounds**：达到上限（默认 3） → 兜底退出
+
+> **震荡判据 1.8.0 重定义**：删除「同一文件改 ≥3 次即震荡」——阈值与 `max_rounds` 相等，正常 loop 跑满必然误判。`stalled` / `no_progress` 只抓「工作区零改动」这一种卡死；「改了但风险不减少」的反复无效改动仍由 `max_rounds` 兜底。
 
 > 不再设「连续两轮收敛」这道门：实测四个真实运行项目均在首轮或次轮收敛，「重复上报拖死收敛」是臆想痛点，已移除相关计数与 risk 签名去重。
 >
@@ -174,10 +178,12 @@ claude --plugin-dir /path/to/delivery-review-plugin
 - 对话记录：`git notes --ref=delivery-review`（审查者留言由编排者代写——审查者零命令权限）
 - 审查材料：`<仓库根>/.delivery-review/work/material.md`，由 PostToolUse hook 自动刷新（头部元信息：生成时间 / 基线 HEAD / **风险分级 tier**；正文：改动清单 / 完整 diff / 新建文件清单）
 - 审查材料快照：`work/material-rN.md`（每轮审查前由编排者复制，字节级留存）
+- 本轮基线：`work/round-baseline.json`（编排者每轮开头写 git tree 对象；hook 用它算本轮增量）
+- 本轮增量：`work/round-delta.json`（hook 写：文件清单 / 行数 / `same_as_prev`；编排者只读不算）
 - 审查日志：`review.log`（**事件流式纯文本，无 markdown**——每条事件一行，ISO 8601 时间戳打头 + 符号标记 ▶/✔/✖，done 行后跟缩进载荷：证据 / 覆盖 / 轨迹原样粘贴，tail/grep 友好）
 - 循环状态：`<仓库根>/.delivery-review/state.json`（`.delivery-review` 固定存仓库根目录，不在子目录创建）
   ```json
-  {"round":0,"last_score":0,"exit_reason":"","max_rounds":3,"open_risk_ids":[],"legacy_risk_ids":[],"defer_risk_ids":[],"file_mod_counts":{},"started_at":"2026-08-28T15:04:05"}
+  {"round":0,"last_score":0,"exit_reason":"","max_rounds":3,"open_risk_ids":[],"legacy_risk_ids":[],"defer_risk_ids":[],"started_at":"2026-08-28T15:04:05"}
   ```
 
 ```

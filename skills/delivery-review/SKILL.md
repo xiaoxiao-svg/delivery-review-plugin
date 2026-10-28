@@ -68,6 +68,8 @@ description: |
 └── work/                 ← 机器工作区，人不打开
     ├── material.md           hook 覆盖写：当前审查材料（给审查者子代理读）
     ├── material-rN.md        编排者复制：每轮材料快照（溯源用）
+    ├── round-baseline.json   编排者每轮开头写：本轮起点（git tree 对象），hook 据此算增量
+    ├── round-delta.json      hook 写：本轮文件清单/行数/是否与上轮全等，编排者只读不算
     └── hook.log              hook 异常日志（低频）
 ```
 
@@ -97,7 +99,6 @@ description: |
     "open_risk_ids": [],
     "legacy_risk_ids": [],
     "defer_risk_ids": [],
-    "file_mod_counts": {},
     "started_at": "2026-08-28T15:04:05"
   }
   ```
@@ -111,7 +112,6 @@ description: |
 | `open_risk_ids` | int[] | 未解决的阻塞项：**本次引入 P0/P1 + 既有 P0**（为空 = 满足退出条件之一；P2 不进池） |
 | `legacy_risk_ids` | int[] | 已登记的**既有问题**（老代码本来就有，不含既有 P0），不参与退出判定，验收时逐条呈现 |
 | `defer_risk_ids` | int[] | 延后的 **P2**（不阻塞退出，但必须持久化，验收时从该字段读取，不靠回忆） |
-| `file_mod_counts` | object | 各文件被修改次数（振荡检测，任一文件 ≥ 3 次即触发） |
 | `started_at` | string | 本次运行开始时间（交付报告计算总耗时；每轮时间戳在 review.log） |
 
 ### 留言格式
@@ -184,7 +184,7 @@ fixer 处理每条 risk 时扫一遍同类位置（同根因 / 同模式），�
 | 本次引入 | 位置落在相对基线 HEAD 的累计 diff 改动行内 | 计入 `open_risk_ids`，阻塞退出（P0/P1） |
 | 既有问题 | **位置不在相对基线 HEAD 的累计 diff 改动行内**（必须给出依据） | 计入 `legacy_risk_ids`，不阻塞退出，验收时逐条呈现；**既有 P0 例外，进 `open_risk_ids` 阻塞** |
 
-> 老问题不因「不是这次改的」就消失，但也不该占用修复轮次、抬高震荡计数——分离登记是为了让两者都不被糊弄。既有 P0 例外：同样必须修，因此进 `open_risk_ids` 一并阻塞退出。
+> 老问题不因「不是这次改的」就消失，但也不该占用修复轮次、抬高改动计数——分离登记是为了让两者都不被糊弄。既有 P0 例外：同样必须修，因此进 `open_risk_ids` 一并阻塞退出。
 >
 > **归属依据的基准是「相对基线 HEAD 的累计 diff」**（材料给的是整个 loop 的改动，不是单轮增量）：本 loop 改过这块 → 本次引入；从没碰过 → 既有问题。
 
@@ -229,10 +229,20 @@ fixer 处理每条 risk 时扫一遍同类位置（同根因 / 同模式），�
 
 ## Loop 退出条件（由 state.json 状态机判定，优先级从高到低）
 
-1. **oscillation / dispute 未解** → 强制退出，移交人工裁决
-2. **quality_gate**：`open_risk_ids` 为空（无未解决的本次引入 P0/P1 与既有 P0）且 `质量分 >= 7` → 正常退出（首轮满足即当轮退出）
-3. **max_rounds**：达到 `max_rounds`（默认 3）→ 兜底退出
+1. **dispute 未解** → 强制退出，移交人工裁决
+2. **stalled**：本轮工作区与上轮全等（`round-delta.same_as_prev`）但 `open_risk_ids` 非空或分数不达标 → **没进展且活没干完**，强制人工裁决
+3. **no_progress**：本轮工作区与上轮全等且 `open_risk_ids` 为空、分数 ≥7 → 正常收口，走验收（quality_gate 的真子集，行为无差异，仅报表区分）
+4. **quality_gate**：`open_risk_ids` 为空（无未解决的本次引入 P0/P1 与既有 P0）且 `质量分 >= 7` → 正常退出（首轮满足即当轮退出）
+5. **max_rounds**：达到 `max_rounds`（默认 3）→ 兜底退出
 
+> **震荡判据已重定义（1.8.0）**：删除 `file_mod_counts >= 3`（阈值与 `max_rounds` 相等，正常 loop 跑满必然误判；且按累计 diff 计数，「没改也 +1」）。震荡的本义是「原地打转」。
+>
+> **覆盖面（勿夸大）**：`stalled` / `no_progress` 只抓「工作区零改动」这一种卡死；**「改了但风险不减少」的反复无效改动没有专门判据，仍由 `max_rounds` 兜底**。
+>
+> **两条判据在 `max_rounds ≤ 3` 下结构上不可达，已移除**：`risk reopen ≥ 2 次`（最快第 4 轮才成立）、`A→B→A 回摆`（最早第 3 轮，与 `max_rounds` 同时到点，只换标签不产生行为差异）。若未来调大 `max_rounds`，需重新评估是否恢复——**恢复前先按新的 `max_rounds` 走一遍路径验算可达性**。
+>
+> **本轮增量来自 `work/round-delta.json`，不由 LLM 数文件**：该文件由 hook 生成（文件清单 / 文件数 / 行数 / `same_as_prev`），编排者只读不算。
+>
 > **不再设「连续两轮收敛」一道门**：实测四个真实运行项目（deepseek-harness-plugin / desktop-pet / pi-web / Folder-Chinese），收敛均在首轮或次轮达成，唯一走到 max_rounds 的是一轮只读扫描（P1 未修，属规则正常拦截）。「重复上报被算成新增导致收敛不了」是臆想痛点，故取消 `consecutive_clean` 计数与 risk 签名去重，退出只看「本次引入 P0/P1 是否清零 + 分数」。
 >
 > **P2 不阻塞退出但要登记**：P2 只进 `defer_risk_ids`，一轮全是 P2 时分数达标即退出，不空转；验收时从该字段读，不靠回忆。
@@ -245,7 +255,7 @@ fixer 处理每条 risk 时扫一遍同类位置（同根因 / 同模式），�
 >
 > **编排者两条抽检**：① ✅ 证据（≤2 条全查，>2 条至少查一半；不合格退回池记 `verify-reject:`）② 既有问题归属（每轮至少查 1 条，确认确实不在累计 diff 内；不合格改判本次引入重新入池记 `misfiled:`）。审查者「省事全标 ✅」或「把问题标成既有来逃避」的收益都大于成本，光靠自觉约束不住。
 >
-> **状态机执行纪律**：编排者每轮必须输出完整 state update block，`open_risk_ids` / `legacy_risk_ids` / `defer_risk_ids` / `file_mod_counts` 全量写回，不依赖 LLM 记忆或心算。
+> **状态机执行纪律**：编排者每轮必须输出完整 state update block，`open_risk_ids` / `legacy_risk_ids` / `defer_risk_ids` 全量写回，不依赖 LLM 记忆或心算。
 
 ---
 
@@ -287,7 +297,7 @@ fixer 处理每条 risk 时扫一遍同类位置（同根因 / 同模式），�
 | 撤回 / 归并记录 | 从 review.log 的 `withdrawn:` / `superseded:` 行读取，说明消失的条目去了哪 | 必须 |
 | 审查方存疑清单 | 拿不准的点（含经验猜测） | 必须 |
 | 双方未知清单 | 修复方与审查方都无法确认的风险 | 必须 |
-| 震荡点 | 反复修改的部分 | 必须 |
+| 卡死点 | 本轮零改动但未收敛（`exit_reason=stalled`） | 必须 |
 | 回归测试 | 原有功能是否被破坏 | 可选 |
 | 体验检查 | 操作顺畅度、提示清晰度 | 可选 |
 

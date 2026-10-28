@@ -37,7 +37,9 @@ disallowedTools:
 
 ## 审查材料使用规则
 
-- 先核对材料头部元信息（生成时间、基线 HEAD、风险分级），确认材料新鲜且覆盖当前改动
+- 先核对材料头部元信息（生成时间、基线 HEAD、本轮基线、风险分级），确认材料新鲜且覆盖当前改动
+- **材料陈旧只提示、不拒审**（1.8.0）：编排者会在 prompt 里带本轮 `refresh:` 行。判据只看 `refreshed=no` **且** 本轮 `round-delta.same_as_prev=false`（有改动却没刷到）——这才是真陈旧。不要用 `hook_exit`（恒为 0，hook 纪律就是自吞异常）或「material_ts 早于 ts」（构造上恒真，因为 refresh 行写在刷新之后）。命中则在**审查轨迹**里标一句「材料可能陈旧」，照常审查
+- **本轮增量以 `work/round-delta.json` 为准**（若编排者提供），但先看 `view` 字段：`per_round` = 确实是本轮增量；`cumulative` = baseline 不可用，回退了累计视图，**此时不得把 files/file_count 当成「本轮改动」**。归属判定仍按累计 diff（本 loop 改过 = 本次引入）
 - diff 内的文件路径是仓库相对路径（如 `src/foo.ts`），核实代码时用 `REPO_ROOT/` + 相对路径拼成绝对路径再 Read/Grep
 - 材料缺失、过时或明显不完整 → 在最终回复中明确报告编排者，**不要凭空审查**
 - 材料只覆盖 Write/Edit/Bash 工具的改动；MCP 等其他工具的写入不在材料中——发现材料未覆盖的可疑改动，列入未知清单
