@@ -93,7 +93,18 @@ try {
   $stat = & git -C $repoRoot diff HEAD --stat 2>$null
   $diff = & git -C $repoRoot diff HEAD 2>$null
   $untracked = & git -C $repoRoot ls-files --others --exclude-standard 2>$null
-  $diffLines = ($diff -split "`n").Count
+  # 与主路径同口径：累计视图也数「增删行数」而非 diff 全文行数
+  $cumNumstat = @(& git -C $repoRoot diff --numstat HEAD 2>$null)
+  $diffLines = 0
+  foreach ($ln in $cumNumstat) {
+    if ($ln -is [string]) {
+      $c = $ln -split "`t"
+      if ($c.Count -ge 2) {
+        if ($c[0] -match '^\d+$') { $diffLines += [int]$c[0] }
+        if ($c[1] -match '^\d+$') { $diffLines += [int]$c[1] }
+      }
+    }
+  }
 
   # ── 累计视图（相对 HEAD，供材料正文完整 diff 使用）────────────────────────
   # 文件集 = diff HEAD --name-only（tracked 增删改）+ ls-files --others（untracked，会展开目录；
@@ -169,10 +180,21 @@ try {
               if ($cols.Count -ge 2) { $cols[$cols.Count - 1].Trim() }
             }
           } | Where-Object { $_ -and ($_ -notmatch '(^|/)\.delivery-review/') })
-          $roundDiff = @(& git -C $repoRoot diff $bl.tree $curTree 2>$null | Where-Object { $_ -ne $null })
-          if ($roundDiff.Count -gt 0) {
-            $roundDiffLines = (@($roundDiff) -join "`n" -split "`n").Count
-          } else { $roundDiffLines = 0 }
+          # 行数口径统一为「增删行数」（numstat），与 fallback 分支保持一致。
+          # 不能用 `git diff` 全文行数：一行改动在全文里是 7 行（含 diff/index/---/+++/@@），
+          # trivial 的 ≤30 门槛会被架空成「只改 4 行以内」（实测：加一行 → 全文 7 行、numstat 1 行）
+          $numstat = @(& git -C $repoRoot diff --numstat $bl.tree $curTree 2>$null)
+          $roundDiffLines = 0
+          foreach ($ln in $numstat) {
+            if ($ln -is [string]) {
+              $c = $ln -split "`t"
+              if ($c.Count -ge 2) {
+                # 二进制文件的增删行数是 "-"，跳过
+                if ($c[0] -match '^\d+$') { $roundDiffLines += [int]$c[0] }
+                if ($c[1] -match '^\d+$') { $roundDiffLines += [int]$c[1] }
+              }
+            }
+          }
           $baselineOk = $true
           $baselineNote = "ok（基线 $($bl.ts)）"
         }
@@ -289,7 +311,9 @@ try {
   }
 
   $materialPath = Join-Path $workDir "material.md"
-  [System.IO.File]::WriteAllText($materialPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+  # 带 BOM 写：PS 5.1 的 Get-Content / Select-String / Add-Content 默认按 GBK 解码无 BOM 的 UTF-8，
+  # 用户直接查看会乱码。BOM 只在文件首字节，不影响内嵌 diff 正文。
+  [System.IO.File]::WriteAllText($materialPath, $sb.ToString(), (New-Object System.Text.UTF8Encoding($true)))
 
   # 本轮增量落盘（机器可读），供验收脚本断言、供编排者更新状态机时读取，
   # 避免「从材料自由文本里数文件/行数」这类 LLM 算术（1.8.0）

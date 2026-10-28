@@ -133,6 +133,15 @@ run_hook
 check "baseline_ok=false（主路径 HEAD 校验）" "$(delta baseline_ok)" "False"
 cd /; rm -rf "$REPO"
 
+echo "== J: 行数口径 = 增删行数（不是 diff 全文行数）=="
+new_repo
+mkbase r1
+printf 'a\n' > f1.txt          # 原文件是 a\nb\n，这里删掉 b 行
+run_hook
+# 一次改动：删 1 行 → 增删合计 1；若错用 diff 全文口径会是 6
+check "diff_lines=1（增删口径）" "$(delta diff_lines)" "1"
+cd /; rm -rf "$REPO"
+
 echo "== I: 脏工作区拍基线后不再改动 → 主路径零改动分支 =="
 new_repo
 printf 'a
