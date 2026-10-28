@@ -21,7 +21,7 @@ HOOK="$REPO_ROOT/hooks/update-review-material.ps1"
 V="${DR_VERIFY_DIR:-$HOME/AppData/Local/Temp/dr-verify}"
 STATE="$V/.delivery-review/state.json"
 DELTA="$V/.delivery-review/work/round-delta.json"
-RESULT="$V/.delivery-review/layer2-result.json"
+RESULT_BASE="$V/.delivery-review"   # 实际文件按场景区分：layer2-result-a2.json / -a3.json
 
 die() { echo "✗ $1" >&2; exit 1; }
 need_win() { cygpath -w "$1" 2>/dev/null || echo "$1"; }
@@ -72,6 +72,7 @@ prepare)
   [ "$SAME" = "True" ] || die "delta.same_as_prev=$SAME，不是「本轮零改动」；检查工作区是否干净"
   [ "$VIEW" = "per_round" ] || die "delta.view=$VIEW，不是 per_round；检查基线是否指向当前 HEAD"
 
+  RESULT="$RESULT_BASE/layer2-result-$SCENARIO.json"
   rm -f "$RESULT"
   echo "✓ 场景 $SCENARIO 已就绪（same_as_prev=True / view=per_round）"
   echo "  期望结论：$EXPECT"
@@ -81,6 +82,7 @@ run)
   # 一条命令跑完：prepare → 无头调用 claude 判 → check
   SCENARIO="${2:-}"
   "$0" prepare "$SCENARIO" || exit 1
+  RESULT="$RESULT_BASE/layer2-result-$SCENARIO.json"
 
   command -v claude >/dev/null 2>&1 || die "claude 命令不可用，无法自动判定；可改用 prepare 后手工在会话里跑"
   echo
@@ -106,7 +108,8 @@ check)
   SCENARIO="${2:-}"
   [ "$SCENARIO" = "a2" ] || [ "$SCENARIO" = "a3" ] || die "场景必须是 a2 或 a3"
   [ "$SCENARIO" = "a2" ] && EXPECT=no_progress || EXPECT=stalled
-  [ -f "$RESULT" ] || die "结果文件不存在：$RESULT（LLM 是否没写？）"
+  RESULT="$RESULT_BASE/layer2-result-$SCENARIO.json"
+  [ -f "$RESULT" ] || die "结果文件不存在：$RESULT（先跑 run $SCENARIO）"
 
   GOT=$(python -c "
 import json,sys
