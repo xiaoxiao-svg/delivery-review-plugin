@@ -6,14 +6,16 @@
 # 只能「造好输入 → 让 LLM 按提示词判 → 校验它写的结论」。
 #
 # 用法：
-#   bash test/layer2-inject.sh prepare a2   # 零改动 + 已达标 → 期望 no_progress
-#   bash test/layer2-inject.sh prepare a3   # 零改动 + 未达标 → 期望 stalled
-#   bash test/layer2-inject.sh check a2     # 校验 LLM 写回的结论
+#   bash test/layer2-inject.sh run a2       # 一条命令跑完（造场景→判定→校验）
+#   bash test/layer2-inject.sh run a3
+#   bash test/layer2-inject.sh prepare a2   # 只造场景并打印提示词（手工模式）
+#   bash test/layer2-inject.sh check a2     # 校验已有结果
 #
 # 前提：在 claude --plugin-dir <本仓库> 的会话里执行 prepare 打印的提示词，
 #       否则测的是已安装副本，不是本分支代码。
 
 set -u
+export PYTHONIOENCODING=utf-8
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK="$REPO_ROOT/hooks/update-review-material.ps1"
 V="${DR_VERIFY_DIR:-$HOME/AppData/Local/Temp/dr-verify}"
@@ -73,25 +75,31 @@ prepare)
   rm -f "$RESULT"
   echo "✓ 场景 $SCENARIO 已就绪（same_as_prev=True / view=per_round）"
   echo "  期望结论：$EXPECT"
+  ;;
+
+run)
+  # 一条命令跑完：prepare → 无头调用 claude 判 → check
+  SCENARIO="${2:-}"
+  "$0" prepare "$SCENARIO" || exit 1
+
+  command -v claude >/dev/null 2>&1 || die "claude 命令不可用，无法自动判定；可改用 prepare 后手工在会话里跑"
   echo
-  echo "──────────────── 在 claude --plugin-dir 会话里粘贴下面这段 ────────────────"
-  cat <<PROMPT
-读取这三个文件（只读，不要修改任何文件、不要执行任何命令）：
+  echo "→ 调用 claude -p 按 Step 3.4 判定（约 20-40 秒）..."
+  PROMPT_TEXT="读取以下文件（只读，不要修改任何文件、不要执行任何命令）：
 1. $(need_win "$STATE")
 2. $(need_win "$DELTA")
 3. $(need_win "$REPO_ROOT/commands/delivery-review.md") 的 Step 3.4「退出判定」
 
-按 Step 3.4 的优先级逐条判定本轮 exit_reason。注意 delta 中
-same_as_prev 与 view 的含义，以及 state 中 open_risk_ids 与 last_score。
+按 Step 3.4 的优先级逐条判定本轮 exit_reason。注意 delta 中 same_as_prev 与 view 的含义，以及 state 中 open_risk_ids 与 last_score。
 
-判完把结论写入 $(need_win "$RESULT")，内容为 JSON：
-{"exit_reason":"<你的判定>","reason":"<一句话依据>"}
+判完把结论写入 $(need_win "$RESULT")，内容为 JSON：{\"exit_reason\":\"<你的判定>\",\"reason\":\"<一句话依据>\"}
+写完只回一行：结果已写入。"
 
-写完只回一行：结果已写入。
-PROMPT
-  echo "────────────────────────────────────────────────────────────────"
-  echo
-  echo "然后运行：bash test/layer2-inject.sh check $SCENARIO"
+  if ! claude -p "$PROMPT_TEXT" >/tmp/layer2-llm.out 2>&1; then
+    echo "  提示：claude 调用有告警，继续校验结果文件"
+  fi
+
+  "$0" check "$SCENARIO"
   ;;
 
 check)
@@ -129,7 +137,9 @@ except Exception:
   ;;
 
 *)
-  echo "用法：bash test/layer2-inject.sh prepare|check a2|a3"
+  echo "用法：bash test/layer2-inject.sh run a2|a3        （一条命令跑完，推荐）"
+  echo "      bash test/layer2-inject.sh prepare a2|a3    （只造场景，打印提示词）"
+  echo "      bash test/layer2-inject.sh check a2|a3      （校验已有结果）"
   exit 1
   ;;
 esac
