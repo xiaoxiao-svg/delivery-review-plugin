@@ -30,7 +30,31 @@ cd "$REPO_ROOT" # 辅助归位；但不要依赖 cd——重要路径一律用 $
 # 3. 确保循环状态文件存在（状态外置，不靠上下文记忆）
 mkdir -p "$REPO_ROOT/.delivery-review"
 if [ ! -f "$REPO_ROOT/.delivery-review/state.json" ]; then
-  echo "{\"round\":0,\"last_score\":0,\"exit_reason\":\"\",\"max_rounds\":3,\"open_risk_ids\":[],\"legacy_risk_ids\":[],\"defer_risk_ids\":[],\"file_mod_counts\":{},\"started_at\":\"$(date +%Y-%m-%dT%H:%M:%S)\"}" > "$REPO_ROOT/.delivery-review/state.json"
+  echo "{\"round\":0,\"last_score\":0,\"exit_reason\":\"\",\"max_rounds\":3,\"open_risk_ids\":[],\"legacy_risk_ids\":[],\"defer_risk_ids\":[],\"started_at\":\"$(date +%Y-%m-%dT%H:%M:%S)\"}" > "$REPO_ROOT/.delivery-review/state.json"
+fi
+
+# 4. 记录本轮基线（1.8.0 起）：把当前工作区快照成 git tree 对象。
+#    hook 之后每轮用「当前 tree − 本轮基线 tree」算本轮增量，
+#    这样 tier 与 no_progress 判定都只看本轮，不被历史累计污染。
+#    排除 .delivery-review：否则 hook 每次重写 material 都会把自己算成改动。
+mkdir -p "$REPO_ROOT/.delivery-review/work"
+BASELINE_FILE="$REPO_ROOT/.delivery-review/work/round-baseline.json"
+# 先删旧基线：写失败必须表现为「缺失」（hook 回退 standard，人眼可见），
+# 不能让上一轮基线残留、被 hook 当成「本轮基线」静默沿用——那样 delta 退化成累计，
+# tier 虚高、same_as_prev 恒为假，no_progress / stalled 双双变成死规则
+rm -f "$BASELINE_FILE"
+TMPIDX=$(mktemp)
+GIT_INDEX_FILE="$TMPIDX" git -C "$REPO_ROOT" read-tree HEAD 2>/dev/null
+GIT_INDEX_FILE="$TMPIDX" git -C "$REPO_ROOT" add -A -- ':(exclude).delivery-review' 2>/dev/null
+GIT_INDEX_FILE="$TMPIDX" git -C "$REPO_ROOT" add -u -- ':(exclude).delivery-review' 2>/dev/null
+TREE=$(GIT_INDEX_FILE="$TMPIDX" git -C "$REPO_ROOT" write-tree 2>/dev/null); rm -f "$TMPIDX"
+if [ -n "$TREE" ]; then
+  ROUND_NOW=$(grep -o '"round"[[:space:]]*:[[:space:]]*[0-9]*' "$REPO_ROOT/.delivery-review/state.json" 2>/dev/null | grep -o '[0-9]*$')
+  printf '{"ts":"%s","head":"%s","round":"%s","tree":"%s"}\n' \
+    "$(date +%Y-%m-%dT%H:%M:%S%z)" "$(git -C "$REPO_ROOT" rev-parse --short HEAD)" "${ROUND_NOW:-0}" "$TREE" \
+    > "$BASELINE_FILE"
+else
+  echo "⚠️ 本轮基线创建失败（write-tree 无输出）：hook 将回退 standard；检查 REPO_ROOT 与 git 状态"
 fi
 ```
 
@@ -124,12 +148,12 @@ Loop 退出标准：
 - 所有目标达成
 - 无未解决的 P0/P1 risk（本次引入的 P0/P1 与既有 P0 都算阻塞项；既有非 P0 问题不进此门，见 Step 4）
 - 质量分 ≥ 7
-- 未触发震荡 / 争议
+- 未触发卡死（stalled）/ 争议
 
 如果标准不准确，请指出。
 ```
 
-用户确认后，写入 git-notes 作为 loop 基准，**并把 `$REPO_ROOT/.delivery-review/state.json` 整体重置为初始状态**（`round=0, last_score=0, exit_reason="", open_risk_ids=[], legacy_risk_ids=[], defer_risk_ids=[], file_mod_counts={}`，max_rounds 不变，`started_at` 刷新为当前时间），**同时删除旧工作区** `$REPO_ROOT/.delivery-review/work/`（防止上一轮残留材料与快照被误读；`review.log` 保留追加，天然按轮次分隔）。
+用户确认后，写入 git-notes 作为 loop 基准，**并把 `$REPO_ROOT/.delivery-review/state.json` 整体重置为初始状态**（`round=0, last_score=0, exit_reason="", open_risk_ids=[], legacy_risk_ids=[], defer_risk_ids=[]`，max_rounds 不变，`started_at` 刷新为当前时间），**同时删除旧工作区** `$REPO_ROOT/.delivery-review/work/`（防止上一轮残留材料与快照被误读；`review.log` 保留追加，天然按轮次分隔）。
 
 > **快车道合并确认**：trivial 档下，Step 0 的上下文、本 Step 的目标声明与 Step 1 的方案**一次性呈现，用户一条回复即全部确认**（例如"可以，就这么改"）。确认后同样写 context 留言、重置 state、删旧材料。确认次数可以合并，**验收环节不可合并**（Step 4 红线不变）。
 
@@ -152,7 +176,8 @@ Loop 退出标准：
 用户已确认快车道且 3.0 校验通过时：
 
 1. **主会话直接实施改动**（不 spawn `delivery-fixer`——改动小到主会话上下文已覆盖全部背景，冷启动子代理是纯开销）。改动一律用 Write/Edit 工具（让 hook 能捕获），完成后等 hook 刷新材料
-2. **轻量审查**：刷新材料（同 3.3 的兜底刷新）→ 执行快照复制 + 向 review.log 追加 begin 事件（同 3.3）→ spawn `delivery-reviewer`，prompt 标注 `tier=trivial` 并**把材料全文内嵌进 prompt**（≤30 行 diff，内嵌省掉子代理一次文件读取），**同时内嵌本轮验证证据**（主会话直改时由编排者自己跑一遍方案里的验证命令，把命令与输出贴进 prompt；没跑就明写「未执行及原因」），要求走轻量模板一轮定音
+   - **动手前先拍基线**：快车道不经过 3.1，基线创建必须复制到这一步——在主会话第一次 Write/Edit **之前**执行 3.1 的基线命令。改完才拍，基线含本轮改动，delta 恒为空，no_progress 立即误判
+2. **轻量审查**：刷新材料（同 3.3 的兜底刷新）→ 执行快照复制 + 向 review.log 追加 begin 事件（同 3.3）→ spawn `delivery-reviewer`，prompt 标注 `tier=trivial` 并**把材料全文内嵌进 prompt**（≤30 行 diff，内嵌省掉子代理一次文件读取），**同时内嵌本轮验证证据**（主会话直改时由编排者自己跑一遍方案里的验证命令，把命令与输出贴进 prompt；没跑就明写「未执行及原因」），**同时内嵌本轮 refresh 行原文**（快车道的可观测性要求与完整流程一致），要求走轻量模板一轮定音
 3. 审查返回后：解析结论（risk / score / approve / confirm / withdraw）代写 git-notes → **向 review.log 追加 done 事件**（格式见 3.3 末尾）→ 更新 state.json（同 3.4；快车道一轮 approve 通常经 quality_gate 即当轮退出）
 4. 审查报出 P0/P1 → **快车道即止**：按 Step 2 重置，转完整流程修复（小改动出了大问题，说明分级估错，回到重流程）
 5. 跳到 Step 4（精简验收）与 Step 5（快车道不生成独立报告文件，review.log 条目 + git-notes 即交付记录）
@@ -170,6 +195,32 @@ Loop 退出标准：
 > fixer 被打断可能留下半成品改动（hook 已刷新材料）：重新对齐后，fixer 下一轮 prompt 以**当前工作区状态**为起点，不基于旧目标续写。
 
 ### 3.1 修复阶段 — spawn `delivery-fixer` 子代理
+
+**spawn 前先拍本轮基线（1.8.0 起，缺它则 tier 与 no_progress 全部失效）**：基线是「本轮改动的起点」，必须在 fixer 动手**之前**记录。
+
+```bash
+mkdir -p "$REPO_ROOT/.delivery-review/work"
+BASELINE_FILE="$REPO_ROOT/.delivery-review/work/round-baseline.json"
+# 先删旧基线：写失败必须表现为「缺失」（hook 回退 standard，人眼可见），
+# 不能让上一轮基线残留、被 hook 当成「本轮基线」静默沿用——那样 delta 退化成累计，
+# tier 虚高、same_as_prev 恒为假，no_progress / stalled 双双变成死规则
+rm -f "$BASELINE_FILE"
+TMPIDX=$(mktemp)
+GIT_INDEX_FILE="$TMPIDX" git -C "$REPO_ROOT" read-tree HEAD 2>/dev/null
+GIT_INDEX_FILE="$TMPIDX" git -C "$REPO_ROOT" add -A -- ':(exclude).delivery-review' 2>/dev/null
+GIT_INDEX_FILE="$TMPIDX" git -C "$REPO_ROOT" add -u -- ':(exclude).delivery-review' 2>/dev/null
+TREE=$(GIT_INDEX_FILE="$TMPIDX" git -C "$REPO_ROOT" write-tree 2>/dev/null); rm -f "$TMPIDX"
+if [ -n "$TREE" ]; then
+  ROUND_NOW=$(grep -o '"round"[[:space:]]*:[[:space:]]*[0-9]*' "$REPO_ROOT/.delivery-review/state.json" 2>/dev/null | grep -o '[0-9]*$')
+  printf '{"ts":"%s","head":"%s","round":"%s","tree":"%s"}\n' \
+    "$(date +%Y-%m-%dT%H:%M:%S%z)" "$(git -C "$REPO_ROOT" rev-parse --short HEAD)" "${ROUND_NOW:-0}" "$TREE" \
+    > "$BASELINE_FILE"
+else
+  echo "⚠️ 本轮基线创建失败（write-tree 无输出）：hook 将回退 standard；检查 REPO_ROOT 与 git 状态"
+fi
+```
+
+> **顺序错了整套机制失效**：基线若在 fixer 改完之后才拍，基线已包含本轮改动，`round-delta.json` 会读成「本轮无改动」，`no_progress` 立刻误判为 stall/收口。每轮 spawn fixer 前必须重新拍一次，不要复用上一轮的基线。
 
 用 Agent 工具调用 agent 类型 `delivery-review:delivery-fixer`（若报找不到 agent，改用短名 `delivery-fixer`），prompt 必须包含：
 - 任务目标（Step 2 内容）
@@ -196,12 +247,27 @@ Loop 退出标准：
 
 ### 3.3 审查阶段 — spawn `delivery-reviewer` 子代理（隔离 + 全禁只读）
 
-**先刷新审查材料（兜底，不依赖 hook）**：编排者自己执行一次材料刷新，保证审查者拿到的材料新鲜：
+**先刷新审查材料（兜底，不依赖 hook）并记录 refresh 行**：编排者自己执行一次材料刷新，**必须捕获退出码与刷新后的材料 mtime**，写成一行 refresh 记录：
 
 ```bash
-powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>/hooks/update-review-material.ps1" </dev/null >/dev/null 2>&1 || true
+sha_of() { if command -v sha1sum >/dev/null 2>&1; then sha1sum | cut -c1-16; else shasum -a 1 | cut -c1-16; fi; }
+MAT="$REPO_ROOT/.delivery-review/work/material.md"
+BEFORE=0; [ -f "$MAT" ] && BEFORE=$(date -r "$MAT" +%s 2>/dev/null || echo 0)
+powershell -NoProfile -ExecutionPolicy Bypass -File "<插件目录>/hooks/update-review-material.ps1" </dev/null >/dev/null 2>&1
+HOOK_EXIT=$?
+AFTER=0; [ -f "$MAT" ] && AFTER=$(date -r "$MAT" +%s 2>/dev/null || echo 0)
+# refreshed=yes 才算真的刷到：只看「材料存在」或「hook 退出码」都会恒真——
+# hook 的纪律是任何情况 exit 0（自吞异常），而材料文件本来就一直在。
+if [ "$AFTER" -gt "$BEFORE" ]; then REFRESHED=yes; else REFRESHED=no; fi
+DIFF_SHA=$(git -C "$REPO_ROOT" diff HEAD | sha_of)
+NOW=$(date +%Y-%m-%dT%H:%M:%S%z)
+echo "[$NOW] refresh: ts=$NOW diff_sha=$DIFF_SHA refreshed=$REFRESHED material_mtime=$(date -r "$MAT" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || echo missing) hook_exit=$HOOK_EXIT" >> "$REPO_ROOT/.delivery-review/review.log"
 ```
 
+> **判据是 `refreshed`，不是 `material_ts` 或 `hook_exit`**：
+> - `hook_exit` 恒为 0 —— hook 的纪律就是「任何情况 exit 0，异常只写 hook.log」，拿它当失败信号必然永远成功
+> - 「材料 mtime 早于本行时间戳」也恒真 —— 本行是在刷新**之后**写的，mtime 构造上就不可能更晚
+> - 唯一有区分力的是**调用前后 mtime 是否变化**。`refreshed=no` 且本轮 `round-delta.same_as_prev=false`（有改动）→ 才是真陈旧，需在 Round 结果里报给用户
 > 插件目录解析：本地开发调试用 `claude --plugin-dir <插件目录>`（目录即仓库路径）；marketplace 安装可用 `claude plugin list` 查看实际路径。路径含空格需保留引号。
 > 正常情况 hook 已在 fixer 每次改动后自动刷新；此步是双保险（hook 失效、用户手动改动、fixer 零改动等场景）。hook 内部按仓库根目录定位，材料写入 `$REPO_ROOT/.delivery-review/work/material.md`，不受本次调用 cwd 影响。
 
@@ -227,6 +293,8 @@ Read 材料头部取「风险分级」字段（完成 3.0 校验）。用 Agent 
 - **上轮未解决 risk 清单**：上一轮 state.json 的 `open_risk_ids` 对应的 risk 全文（含 ID）。明确要求审查者**逐条复查并给出 ✅已修复（附证据）/ ❌未修复（续报）/ ⚠️无法确认**——状态机只认「✅已修复 + 证据」才出池；漏写等于留在池中继续阻塞
 - **本轮验证证据**：两个来源都要给，缺一则注明——① fixer 在 review / done 留言里贴的命令与输出原文（没有就写「fixer 未提供」）；② 编排者自己代跑的结果（`verify:` 行的原文，没跑写「未代跑 + 原因」）。审查者判定某问题为「已验证」时**必须引用这两段证据之一**；引用不出则最高只能判「可复现」或「代码推断」
 - **既有问题清单**：上一轮结束时 state.json 的 `legacy_risk_ids` 对应的 risk 原文。要求审查者对已登记的老问题**不再重复上报**——若认为某条仍需关注，只在存疑清单里提一句，不占 risk 名额
+- **本轮 refresh 行原文**：从 review.log 取刚写的那行（`diff_sha` / `refreshed` / `material_mtime` / `hook_exit`），原样贴进 prompt。审查者据此判断材料是否陈旧——判据是 `refreshed=no` **且** `delta.view=per_round` **且** `delta.same_as_prev=false`；`view=cumulative` 时无从判断，按「无法判断」处理，不得当成陈旧
+- **本轮 round-delta**：`work/round-delta.json` 的原文（含 tier / files / file_count / diff_lines / same_as_prev），让审查者知道 tier 依据的是本轮增量而非累计
 - 当前 git-notes 最大留言 ID（让它编号）
 - 明确"结论与**审查轨迹**写在最终回复文本中，由编排者代写进 git-notes / review.log"
 
@@ -261,6 +329,12 @@ round = round + 1
 # 1. 分拣本轮 risk（只统计正式 risk：证据等级 ∈ 已验证/可复现/代码推断；经验猜测不进入）
 本次引入 risk = 本轮 risk 中「归属=本次引入」的（未标归属的默认按本次引入处理，从严）
 既有问题     = 本轮 risk 中「归属=既有问题」的（必须附证据：该位置不在相对基线 HEAD 的 diff 改动行内）
+
+# 1b. 基线时效校验（防止「漏拍基线」静默沿用上轮）
+#    HEAD 校验只能挡「中途 commit」；fixer 禁止 commit 时 HEAD 全程不变，
+#    漏拍 3.1 会让 delta 变成跨轮累计而无人察觉。用 delta 的基线线索兜底：
+#    若 delta.baseline_ok=false → 本轮增量不可信，tier 与 same_as_prev 都不采信
+#    （3.4 第 5 步已要求「baseline_ok=false 按有改动处理」，此处再确认一次）
 
 # 2. 未解决池维护（open_risk_ids，跨轮累积）
 #    池内每条只能通过下面三种明确出口离开，其余一律留在池中
@@ -307,18 +381,34 @@ defer_risk_ids = (defer_risk_ids - 已修复的deferID) ∪ 本轮 P2 的 ID
    「已修复的deferID」= reviewer 明确判 ✅ 已修复、或被链归并到已修 ID 的 defer 条目
    出池同样记一行 `defer-closed: R<ID>`——只入不出会让已修的 P2 永久挂在验收清单上
 
-# 5. 文件修改计数（震荡检测）
-从 work/material.md 读取本轮改动文件列表，更新 file_mod_counts：
-  每个被修改的文件计数 +1（新文件从 1 开始）
+# 5. 本轮改动（读 work/round-delta.json，不由 LLM 数文件）
+delta = Read work/round-delta.json
+   delta.files / delta.file_count / delta.diff_lines / delta.same_as_prev / delta.baseline_ok
+   ❌ 禁止从 material.md 自由文本里数文件或行数——那是 LLM 算术，正是 1.8.0 要消灭的东西
+   delta 缺失或 baseline_ok=false → 本轮增量不可知，按「有改动」处理（不判 no_progress）
 
 # 6. 质量分
 last_score = 本轮 score
 
-# 7. 退出判定（按优先级，无 converged 一轮）
-1. 任一文件 file_mod_counts >= 3，或 dispute 未解决 → exit_reason="oscillation"/"dispute"，强制退出
-2. open_risk_ids 为空 且 last_score >= 7 → exit_reason="quality_gate"
-3. round >= max_rounds(3) → exit_reason="max_rounds"
+# 7. 退出判定（按优先级）
+1. dispute 未解决 → exit_reason="dispute"，强制退出
+2. delta.same_as_prev 为真（相邻两轮工作区内容全等，本轮没改进任何东西）：
+     open_risk_ids 为空 且 last_score >= 7 → exit_reason="no_progress"
+        （注意：这是 quality_gate 的真子集，行为无差异，仅用于报表区分「收敛时本轮零改动」）
+     否则                                   → exit_reason="stalled"（没进展但活没干完，交人工裁决）
+3. open_risk_ids 为空 且 last_score >= 7 → exit_reason="quality_gate"
+4. round >= max_rounds(3) → exit_reason="max_rounds"
 否则：继续下一轮（回到 3.1）
+
+# 已移除：file_mod_counts >= 3 判震荡（1.8.0）
+#   原因：阈值 3 与 max_rounds 3 相等，正常 loop 跑满必然触发；且累计 diff 计数让
+#   「没改也 +1」。
+#   覆盖面说明（勿夸大）：stalled/no_progress 只抓「工作区零改动」这一种卡死；
+#   「改了但风险不减少」（反复无效改动）仍由 max_rounds 兜底，没有专门判据。
+# 已移除：risk reopen ≥2 次、A→B→A 回摆两条判据（1.8.0）
+#   原因：max_rounds ≤ 3 下结构上不可达（reopen 第 2 次最早第 4 轮；回摆最早第 3 轮
+#   且与 max_rounds 同时到点，只换标签不产生行为差异）。若未来调大 max_rounds，
+#   需重新评估是否恢复——恢复前先验算可达性。
 
 # 写回 state.json（必须包含全部字段）
 {
@@ -329,14 +419,13 @@ last_score = 本轮 score
   "open_risk_ids": [ ... ],        // 全量，未解决的阻塞项（本次引入 P0/P1 + 既有 P0）
   "legacy_risk_ids": [ ... ],      // 全量，已登记的既有问题（不含既有 P0）
   "defer_risk_ids": [ ... ],       // 全量，延后的 P2
-  "file_mod_counts": { ... },      // 全量
   "started_at": started_at         // 原值，不刷新
 }
 ```
 
 > **为什么不再做「新增 risk」计数**：实测四个项目均未出现重复上报拖死收敛，重复计数属臆想需求；收敛判定只看「阻塞项是否清零 + 分数是否达标」，机制简单且不依赖 LLM 给 risk 打签名。既有问题单独登记，不影响退出，但**必须在 Step 4 验收中显式列出，不许静默吞掉**。
 > **出池只能靠正向确认**：`open_risk_ids` 的每一条，都必须有 reviewer 明确的「已修复」判定才能离开。让审查者比对「上轮清单 vs 本轮代码」是有意为之——它拿到的是累计 diff，看得见坏修复，但看不见自己上轮提过什么，所以必须把上轮清单喂给它。
-> **状态机执行纪律**：每轮必须输出完整的 state update block，`open_risk_ids` / `legacy_risk_ids` / `defer_risk_ids` / `file_mod_counts` 四个字段全量写回，不可依赖 LLM 记忆或心算。
+> **状态机执行纪律**：每轮必须输出完整的 state update block，`open_risk_ids` / `legacy_risk_ids` / `defer_risk_ids` 三个字段全量写回，不可依赖 LLM 记忆或心算。
 > **P2 不阻塞退出**：P2 只进 `defer_risk_ids`，一轮全是 P2 时 `open_risk_ids` 为空，分数达标即当轮退出，不空转；但 P2 必须持久化登记，验收时从 `defer_risk_ids` 读取，不靠回忆。
 
 输出本轮审查结果：
@@ -350,7 +439,7 @@ last_score = 本轮 score
 验证证据：已执行 / 未执行（原因）
 审查未知清单：M 项
 审查方存疑清单：Z 项（不参与统计，人工验收判断）
-状态：继续 → Round N+1 / ✅ 收敛（quality_gate）/ ⚠️ 达到上限 / ⚠️ 震荡退出
+状态：继续 → Round N+1 / ✅ 收敛（quality_gate / no_progress）/ ⚠️ 达到上限 / ⚠️ 卡死（stalled）
 ```
 
 ---
