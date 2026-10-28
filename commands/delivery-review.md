@@ -30,7 +30,7 @@ cd "$REPO_ROOT" # 辅助归位；但不要依赖 cd——重要路径一律用 $
 # 3. 确保循环状态文件存在（状态外置，不靠上下文记忆）
 mkdir -p "$REPO_ROOT/.delivery-review"
 if [ ! -f "$REPO_ROOT/.delivery-review/state.json" ]; then
-  echo "{\"round\":0,\"consecutive_clean\":0,\"last_score\":0,\"exit_reason\":\"\",\"max_rounds\":3,\"file_mod_counts\":{},\"last_round_risk_ids\":[],\"started_at\":\"$(date +%Y-%m-%dT%H:%M:%S)\"}" > "$REPO_ROOT/.delivery-review/state.json"
+  echo "{\"round\":0,\"last_score\":0,\"exit_reason\":\"\",\"max_rounds\":3,\"open_risk_ids\":[],\"legacy_risk_ids\":[],\"defer_risk_ids\":[],\"file_mod_counts\":{},\"started_at\":\"$(date +%Y-%m-%dT%H:%M:%S)\"}" > "$REPO_ROOT/.delivery-review/state.json"
 fi
 ```
 
@@ -74,7 +74,7 @@ fi
 1. 要改的文件：
 2. 需要什么配置：
 3. 可能影响哪里：
-4. 改完怎么验证：
+4. 改完怎么验证：（**必须是可执行的命令或明确的用户可操作步骤**——这条会被真的执行：能跑成命令的由编排者代跑并存档，跑不了的要写明为什么。写成「跑一下测试」这种无法落地的描述，等于没写）
 【预估档位】trivial / standard / critical（按预估改动文件数、diff 行数、是否触碰关键路径 hooks·CI·auth·migration 等给出，供选择流程档位）
 【替代路径】（有多个可行方案时列出 A/B，各附代价）
 ```
@@ -122,14 +122,14 @@ fi
 
 Loop 退出标准：
 - 所有目标达成
-- 审查方确认无新增风险
-- 连续两轮收敛
+- 无未解决的 P0/P1 risk（本次引入的 P0/P1 与既有 P0 都算阻塞项；既有非 P0 问题不进此门，见 Step 4）
 - 质量分 ≥ 7
+- 未触发震荡 / 争议
 
 如果标准不准确，请指出。
 ```
 
-用户确认后，写入 git-notes 作为 loop 基准，**并把 `$REPO_ROOT/.delivery-review/state.json` 整体重置为初始状态**（`round=0, consecutive_clean=0, last_score=0, exit_reason="", file_mod_counts={}, last_round_risk_ids=[]`，max_rounds 不变，`started_at` 刷新为当前时间），**同时删除旧工作区** `$REPO_ROOT/.delivery-review/work/`（防止上一轮残留材料与快照被误读；`review.log` 保留追加，天然按轮次分隔）。
+用户确认后，写入 git-notes 作为 loop 基准，**并把 `$REPO_ROOT/.delivery-review/state.json` 整体重置为初始状态**（`round=0, last_score=0, exit_reason="", open_risk_ids=[], legacy_risk_ids=[], defer_risk_ids=[], file_mod_counts={}`，max_rounds 不变，`started_at` 刷新为当前时间），**同时删除旧工作区** `$REPO_ROOT/.delivery-review/work/`（防止上一轮残留材料与快照被误读；`review.log` 保留追加，天然按轮次分隔）。
 
 > **快车道合并确认**：trivial 档下，Step 0 的上下文、本 Step 的目标声明与 Step 1 的方案**一次性呈现，用户一条回复即全部确认**（例如"可以，就这么改"）。确认后同样写 context 留言、重置 state、删旧材料。确认次数可以合并，**验收环节不可合并**（Step 4 红线不变）。
 
@@ -152,7 +152,7 @@ Loop 退出标准：
 用户已确认快车道且 3.0 校验通过时：
 
 1. **主会话直接实施改动**（不 spawn `delivery-fixer`——改动小到主会话上下文已覆盖全部背景，冷启动子代理是纯开销）。改动一律用 Write/Edit 工具（让 hook 能捕获），完成后等 hook 刷新材料
-2. **轻量审查**：刷新材料（同 3.3 的兜底刷新）→ 执行快照复制 + 向 review.log 追加 begin 事件（同 3.3）→ spawn `delivery-reviewer`，prompt 标注 `tier=trivial` 并**把材料全文内嵌进 prompt**（≤30 行 diff，内嵌省掉子代理一次文件读取），要求走轻量模板一轮定音
+2. **轻量审查**：刷新材料（同 3.3 的兜底刷新）→ 执行快照复制 + 向 review.log 追加 begin 事件（同 3.3）→ spawn `delivery-reviewer`，prompt 标注 `tier=trivial` 并**把材料全文内嵌进 prompt**（≤30 行 diff，内嵌省掉子代理一次文件读取），**同时内嵌本轮验证证据**（主会话直改时由编排者自己跑一遍方案里的验证命令，把命令与输出贴进 prompt；没跑就明写「未执行及原因」），要求走轻量模板一轮定音
 3. 审查返回后：解析结论（risk / score / approve / confirm / withdraw）代写 git-notes → **向 review.log 追加 done 事件**（格式见 3.3 末尾）→ 更新 state.json（同 3.4；快车道一轮 approve 通常经 quality_gate 即当轮退出）
 4. 审查报出 P0/P1 → **快车道即止**：按 Step 2 重置，转完整流程修复（小改动出了大问题，说明分级估错，回到重流程）
 5. 跳到 Step 4（精简验收）与 Step 5（快车道不生成独立报告文件，review.log 条目 + git-notes 即交付记录）
@@ -174,8 +174,12 @@ Loop 退出标准：
 用 Agent 工具调用 agent 类型 `delivery-review:delivery-fixer`（若报找不到 agent，改用短名 `delivery-fixer`），prompt 必须包含：
 - 任务目标（Step 2 内容）
 - **仓库根目录 `REPO_ROOT=$REPO_ROOT`**（改动文件一律基于 REPO_ROOT 定位，防止会话从子目录启动时读写错位）
+- **编排者代跑的验证结果**（如有）：命令 + 通过/失败 + 关键输出行。**失败项是本轮必修输入**，fixer 必须先修到通过或说明为何该失败与本次改动无关
 - git-notes 留言（**编排者预过滤后传入，不让 fixer 自己翻**）：本轮 context 留言 + 最新一轮全部 risk / done / dispute / confirm / withdraw 留言，**按 ID 升序排列**（fixer 以最后一条的 ID 为最大编号基准）+ 在场留言总数一句话（如「共 47 条，以上为与本轮相关的全部」）。历史轮已解决的留言不传——子代理上下文按 token 计价，无关注释是重复读取税
+  - **只传「本次引入」的 risk + 既有 P0**：标「归属=既有问题」的非 P0 条目**不传给 fixer**，它们已进 `legacy_risk_ids` 登记，不占修复轮次。P2 一并传入供其判断是否顺手处理，不强制（fixer 对 P2 可回「不处理 + 理由」，不必凑 done / dispute）
 - 本轮角色：首轮=实现改动；后续轮=逐条处理 risk
+- **要求 fixer 的 review / done 留言必须含【验证证据】**：实际执行了什么命令、输出关键行；跑不了就写「未运行 + 原因」。没有验证证据的「改好了」不被采信
+- **要求同类排查**：处理每条 risk 时扫描同类位置（同根因 / 同模式），留言写清「扫描范围 / 另有 N 处 / 已修或未修原因」
 
 等待其返回，确认它已把 `review` / `done` / `dispute` 留言写入 git-notes。
 
@@ -184,6 +188,7 @@ Loop 退出标准：
 ```
 ━━━ Round N ━━━
 修复方已完成：改动 M 个文件 / 处理 K 条 risk
+未复查：N 条（R…）（上一轮池内条目中，本轮审查者未给结论的；无则写「无」）
 意图：一句话
 未知清单：X 项
 → 进入审查...
@@ -218,9 +223,20 @@ Read 材料头部取「风险分级」字段（完成 3.0 校验）。用 Agent 
 - 任务目标（Step 2 内容）
 - **仓库根目录 `REPO_ROOT=$REPO_ROOT`**（材料路径用绝对路径；diff 内文件路径以 REPO_ROOT 为基准拼接后再 Read/Grep 核实）
 - 审查材料路径 `$REPO_ROOT/.delivery-review/work/material.md`（让它自行 Read）
-- **本轮风险分级**：材料头部的 tier 值（critical / standard / trivial），审查者按此选择深度
+- **本轮风险分级**：材料头部的 tier 值（critical / standard / trivial），审查者按此深度审查
+- **上轮未解决 risk 清单**：上一轮 state.json 的 `open_risk_ids` 对应的 risk 全文（含 ID）。明确要求审查者**逐条复查并给出 ✅已修复（附证据）/ ❌未修复（续报）/ ⚠️无法确认**——状态机只认「✅已修复 + 证据」才出池；漏写等于留在池中继续阻塞
+- **本轮验证证据**：两个来源都要给，缺一则注明——① fixer 在 review / done 留言里贴的命令与输出原文（没有就写「fixer 未提供」）；② 编排者自己代跑的结果（`verify:` 行的原文，没跑写「未代跑 + 原因」）。审查者判定某问题为「已验证」时**必须引用这两段证据之一**；引用不出则最高只能判「可复现」或「代码推断」
+- **既有问题清单**：上一轮结束时 state.json 的 `legacy_risk_ids` 对应的 risk 原文。要求审查者对已登记的老问题**不再重复上报**——若认为某条仍需关注，只在存疑清单里提一句，不占 risk 名额
 - 当前 git-notes 最大留言 ID（让它编号）
 - 明确"结论与**审查轨迹**写在最终回复文本中，由编排者代写进 git-notes / review.log"
+
+**验证证据的兜底采集（编排者自己做，不能只依赖 fixer 自述）**：Step 1 方案里用户已确认的验证方式若可执行为命令，编排者代跑一次，把命令 + 输出摘要（成功/失败 + 关键行）写进 review.log 的 `verify:` 行，并一并贴进 reviewer prompt：
+
+```bash
+echo "[$(date +%Y-%m-%dT%H:%M:%S%z)] verify: <命令> -> <通过|失败> | <输出关键行>" >> "$REPO_ROOT/.delivery-review/review.log"
+```
+
+> **验证失败不是日志噪音**：命令失败说明改动很可能没生效，必须在 Round 结果里显式报给用户，并作为下一轮修复的输入；不得只在 review.log 留一行就继续推进。方案里的验证方式若是自然语言（如「跑一下测试」）而无法直接执行为命令，编排者不要自行发明命令，标注「未能代跑」并交由 fixer 自证。
 
 等待其返回。**编排者从返回文本提取 risk / score / approve / confirm / withdraw 结论，代写进 git-notes**（审查者禁 Bash 无法自行写入；留言 ID 沿用审查者按「最大 ID + 1」开始的编号）。
 
@@ -237,60 +253,104 @@ Read 材料头部取「风险分级」字段（完成 3.0 校验）。用 Agent 
 
 ### 3.4 编排者更新状态机（关键，必须执行）
 
-读取本轮 reviewer 的 score 结论，解析 `质量评分` 与 `收敛判断`，更新 `$REPO_ROOT/.delivery-review/state.json`。**本步必须输出标准化的 state update block，不可省略任何字段**：
+读取本轮 reviewer 的 score 结论，解析 `质量评分` 与 risk 列表，更新 `$REPO_ROOT/.delivery-review/state.json`。**本步必须输出标准化的 state update block，不可省略任何字段**：
 
 ```
 round = round + 1
-本轮 risk 数 = 最新 risk 留言中【证据等级 ∈ 已验证/可复现/代码推断】的数量
-              （经验猜测级不算 risk，只进存疑清单，不参与统计）
-本轮 risk ID 列表 = 本轮所有正式 risk 的留言 ID（用于下一轮对比新增）
-新增 risk 数 = 本轮 risk ID 列表 - last_round_risk_ids 的差集大小
-if 本轮 risk == 0 或 新增 risk == 0:
-    consecutive_clean += 1
-else:
-    consecutive_clean = 0
 
-# 文件修改计数（用于振荡检测）
+# 1. 分拣本轮 risk（只统计正式 risk：证据等级 ∈ 已验证/可复现/代码推断；经验猜测不进入）
+本次引入 risk = 本轮 risk 中「归属=本次引入」的（未标归属的默认按本次引入处理，从严）
+既有问题     = 本轮 risk 中「归属=既有问题」的（必须附证据：该位置不在相对基线 HEAD 的 diff 改动行内）
+
+# 2. 未解决池维护（open_risk_ids，跨轮累积）
+#    池内每条只能通过下面三种明确出口离开，其余一律留在池中
+new_open = 本次引入 risk 中 P0/P1 的 ID
+        ∪ 既有问题中 P0 的 ID（既有 P0 同样必须修，一并阻塞退出）
+
+# 出口 A：已修复（reviewer 在【上轮未解决 risk 复查】段写 ✅ 且带证据）
+已确认修复 = 上一轮 open_risk_ids 中，本轮 reviewer 明确判定「已修复」的 ID
+             判定须带证据，且证据必须锚定到相对基线 HEAD 的 diff 改动行
+             （原问题行或修复行均可；证据指向未改动的行 = 未修复）
+
+# 出口 B：误报撤回（reviewer 输出 withdraw，或在复查段写「⚠️误报/撤回」）
+已撤回 = 上一轮 open_risk_ids 中，本轮被 withdraw 或复查段判定为误报的 ID
+         出口须在 review.log 记一行 `withdrawn: R<ID> | 理由`
+
+# 出口 C：链归并（续报时新 risk 的 reply_to 指向池内旧 ID，**含降级续报**）
+若**本轮任一 risk（P0/P1/P2 都算）**的 reply_to ∈ open_risk_ids：
+    不新增独立条目，按链归并为 **最新 ID**，旧 ID 标记 superseded 后出池
+    降级续报（如 P1 部分修复后剩 P2）：旧 ID 出池，新 P2 按常规进 defer_risk_ids
+    复查时对链上任一 ID 判 ✅ 已修复 → 整链一并出池
+    链归并同样在 review.log 记一行 `superseded: R<旧>(<旧级别>) -> R<新>(<新级别>)`（带级别，验收面据此看出是降级还是同级）
+   ⚠️ 谓词必须覆盖 P2：只看 new_open 会漏掉「P1 修掉主因、剩细节降为 P2」这条最常见的结局，
+      该旧 ID 将无处可去，卡到 oscillation/max_rounds，把机制缺陷伪装成「未收敛」
+
+open_risk_ids = (open_risk_ids - 已确认修复 - 已撤回 - 被归并旧ID) ∪ new_open
+   ❌ 禁止用「本轮未再被上报」推定已修复——reviewer 漏报会让真问题静默出池
+   ⚠️ 上轮 open risk 本轮既未判定「已修复」、也未 withdraw、也未续报的，视为「未复查」，
+      **留在池中**，并在 3.2 进度里标注「未复查 N 条」，下一轮 prompt 强制点名要求复查
+
+# 2b. 编排者抽检（两条通道都要查，防止「省事全标」与「降级逃避」）
+① ✅ 已修复证据抽检：抽检数量随 ✅ 条数伸缩——≤2 条全查，>2 条至少查一半
+   Read 证据指向的行，确认改动确实存在且相关
+   不合格 → 该 ID 退回池中，review.log 记 `verify-reject: R<ID> | 不合格原因`
+② 既有问题归属抽检：本轮新登记进 legacy_risk_ids 的条目至少查 1 条
+   Read 该行，确认它确实不在相对基线 diff 的改动范围内
+   不合格 → 改判为「本次引入」重新入池，review.log 记 `misfiled: R<ID> | 实际属于本次引入`
+本轮无可抽检项 → 跳过并在 3.2 标注「本轮无可抽检项」
+
+# 3. 既有问题登记（legacy_risk_ids，跨轮累积，不参与退出判定；既有 P0 已进 open_risk_ids）
+legacy_risk_ids = legacy_risk_ids ∪ (既有问题ID - 既有P0的ID)
+
+# 4. P2 延后清单（defer_risk_ids，跨轮累积，持久化以替代记忆；同样要有出池规则）
+defer_risk_ids = (defer_risk_ids - 已修复的deferID) ∪ 本轮 P2 的 ID
+   「已修复的deferID」= reviewer 明确判 ✅ 已修复、或被链归并到已修 ID 的 defer 条目
+   出池同样记一行 `defer-closed: R<ID>`——只入不出会让已修的 P2 永久挂在验收清单上
+
+# 5. 文件修改计数（震荡检测）
 从 work/material.md 读取本轮改动文件列表，更新 file_mod_counts：
   每个被修改的文件计数 +1（新文件从 1 开始）
 
-# 质量分更新
+# 6. 质量分
 last_score = 本轮 score
 
-退出判定（按优先级）：
+# 7. 退出判定（按优先级，无 converged 一轮）
 1. 任一文件 file_mod_counts >= 3，或 dispute 未解决 → exit_reason="oscillation"/"dispute"，强制退出
-2. consecutive_clean >= 2 → exit_reason="converged"
-3. last_score >= 7 且无 P0/P1 → exit_reason="quality_gate"
-4. round >= max_rounds(3) → exit_reason="max_rounds"
+2. open_risk_ids 为空 且 last_score >= 7 → exit_reason="quality_gate"
+3. round >= max_rounds(3) → exit_reason="max_rounds"
 否则：继续下一轮（回到 3.1）
-# 注意判定顺序的实际效果：首轮若无 risk 且 score>=7，第 3 条即满足、当轮退出——
-# 不要为凑 converged(连续两轮) 而空转第二轮，小交付多跑一轮就是多交一次混乱税
 
 # 写回 state.json（必须包含全部字段）
 {
   "round": round,
-  "consecutive_clean": consecutive_clean,
   "last_score": last_score,
   "exit_reason": exit_reason,
   "max_rounds": max_rounds,
-  "file_mod_counts": { ... },        // 全量，不省略
-  "last_round_risk_ids": [ ... ]     // 本轮 risk ID 列表
+  "open_risk_ids": [ ... ],        // 全量，未解决的阻塞项（本次引入 P0/P1 + 既有 P0）
+  "legacy_risk_ids": [ ... ],      // 全量，已登记的既有问题（不含既有 P0）
+  "defer_risk_ids": [ ... ],       // 全量，延后的 P2
+  "file_mod_counts": { ... },      // 全量
+  "started_at": started_at         // 原值，不刷新
 }
 ```
 
-> 注：P0/P1 判定同样只看正式 risk（证据等级为已验证/可复现/代码推断），存疑清单不参与；"新增 risk"指与上一轮 risk 集合相比新提出的（正文不重复）；**无证据等级的 risk 默认按经验猜测处理（只进存疑清单）**。
-> **状态机执行纪律**：每轮必须输出完整的 state update block，包含 file_mod_counts 和 last_round_risk_ids 的更新，不可依赖 LLM 记忆或心算。
+> **为什么不再做「新增 risk」计数**：实测四个项目均未出现重复上报拖死收敛，重复计数属臆想需求；收敛判定只看「阻塞项是否清零 + 分数是否达标」，机制简单且不依赖 LLM 给 risk 打签名。既有问题单独登记，不影响退出，但**必须在 Step 4 验收中显式列出，不许静默吞掉**。
+> **出池只能靠正向确认**：`open_risk_ids` 的每一条，都必须有 reviewer 明确的「已修复」判定才能离开。让审查者比对「上轮清单 vs 本轮代码」是有意为之——它拿到的是累计 diff，看得见坏修复，但看不见自己上轮提过什么，所以必须把上轮清单喂给它。
+> **状态机执行纪律**：每轮必须输出完整的 state update block，`open_risk_ids` / `legacy_risk_ids` / `defer_risk_ids` / `file_mod_counts` 四个字段全量写回，不可依赖 LLM 记忆或心算。
+> **P2 不阻塞退出**：P2 只进 `defer_risk_ids`，一轮全是 P2 时 `open_risk_ids` 为空，分数达标即当轮退出，不空转；但 P2 必须持久化登记，验收时从 `defer_risk_ids` 读取，不靠回忆。
 
 输出本轮审查结果：
 
 ```
 ━━━ Round N 审查结果 ━━━
 质量评分：N/10
-收敛判断：...
-新增 risk：X 条（P0:a P1:b P2:c）
-审查未知清单：Y 项
+本次引入 risk：X 条（P0:a P1:b P2:c）
+既有问题（登记不修）：Y 条
+未解决池：K 条（P0/P1，决定是否继续循环）
+验证证据：已执行 / 未执行（原因）
+审查未知清单：M 项
 审查方存疑清单：Z 项（不参与统计，人工验收判断）
-状态：继续 → Round N+1 / ✅ 收敛 / ⚠️ 达到上限 / ⚠️ 震荡退出
+状态：继续 → Round N+1 / ✅ 收敛（quality_gate）/ ⚠️ 达到上限 / ⚠️ 震荡退出
 ```
 
 ---
@@ -307,6 +367,12 @@ Loop 退出后（`$REPO_ROOT/.delivery-review/state.json` 的 `exit_reason` 字�
 【Loop 最终状态】总轮数 / 退出原因 / 最终质量评分
 【已解决 risk】逐条
 【未解决 / defer 项】
+【撤回 / 归并记录】R<旧> → 撤回（理由） / R<旧> → R<新>（归并原因）
+  数据源：review.log 中**本次运行全部轮次**的 `withdrawn:` / `superseded:` 行（不限本轮——第 1 轮撤回的条目，第 3 轮退出时同样要列出）；没有则写「无」
+  作用：池内条目消失时，让你看得见是撤回了还是换了 ID，而不是凭空少几条
+【既有问题清单（本次未修，需你决定是否另开任务）】
+  逐条：文件:行号 + 分级 + 一句话 + 为什么判定为既有问题（不属于本次改动范围）
+【验证证据】实际跑过的命令 + 结果（通过 / 失败 / 未能代跑及原因）
 【审查方存疑清单】（审查者拿不准的点，含经验猜测，需人工判断）
 【双方未知清单（人工验收重点关注）】
   修复方：...
@@ -314,6 +380,7 @@ Loop 退出后（`$REPO_ROOT/.delivery-review/state.json` 的 `exit_reason` 字�
 【验收引导】每项验收附"怎么测 / 什么现象算通过"
 
 ⚠️ 人工验收不可跳过：验收**裁决权**（通过/不通过）必须由用户行使，不可由 AI 代理。
+⚠️ 既有问题清单不许静默省略：退出 loop 时不代表老问题消失，必须逐条摆到用户面前。
 ```
 
 ### AI 代验（可选，不改变红线）
@@ -343,9 +410,12 @@ $REPO_ROOT/docs/delivery-review-<YYYYMMDD>-<HHmm>.md
 【目标】用户原话
 【方案】含用户选择的路径
 【流程档位】trivial / standard / critical + 升级记录（快车道被 hook 校验打回的，注明轮次与原因）
-【Loop 轮次摘要】每轮 risk 与质量分
+【Loop 轮次摘要】每轮：本次引入 risk 数 / 既有问题数 / 质量分 / 分数与退出判定
 【已解决 risk】逐条
 【未解决 / defer 项】
+【撤回 / 归并记录】R<旧> → 撤回（理由） / R<旧> → R<新>（归并原因）
+【既有问题清单（本次未修）】逐条 + 是否建议另开任务
+【验证证据】跑过的命令与输出摘要（通过 / 失败 / 未能代跑原因）
 【审查方存疑清单】+ 【双方未知清单】
 【对话实录】本轮 git-notes 全部留言按 ID 顺序原样渲染（ID｜from｜type｜正文）——risk 怎么提出、fixer 怎么回应、dispute 怎么收场，一屏可查；这是人工复核的对话级证据
 【审查轨迹汇总】各轮轨迹（从 review.log 逐 Round 摘录）——审查者看了什么、核实到 文件:行号、哪些维度未覆盖
@@ -353,6 +423,7 @@ $REPO_ROOT/docs/delivery-review-<YYYYMMDD>-<HHmm>.md
 【运行耗时】state.json started_at → 报告生成时刻（总耗时 / 轮数 / 平均轮耗时）
 【验收结论】通过 / 未通过（原因 + 待办清单）
 【AI 代验结果】如有，含证据等级
+【漏检复盘】（仅验收不通过时填写）当时审查材料缺了什么 / 哪条规则没覆盖 / 建议沉淀到哪个文件（CLAUDE.md / SKILL.md / agent 定义 / hook），为下次同类问题留抓手
 ```
 
 > 溯源链闭环：报告 → 对话实录（谁说了什么）→ 审查轨迹（凭什么说）→ 材料快照（当时看到的是什么）→ git diff 基线（终态随时可 diff 复核）。四层缺一，人工复核即断链——报告生成前编排者按此清单自检。
