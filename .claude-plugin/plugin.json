@@ -1,6 +1,6 @@
 {
   "name": "delivery-review",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "基于 git-notes 的双 Agent 交付协作工作流（loop 模式）：上下文确认 → 方案（双轨+用户选择，大改动含产品视角审查）→ 修复 Agent ↔ 审查 Agent 隔离子代理循环迭代 → 人工验收（裁决权归用户）→ 交付报告。按风险分级路由（trivial 快车道 / standard / critical，hook 机械校验兜底），审查留痕可溯源（对话实录 / 审查轨迹 / 材料快照），强调「未知清单」元认知。",
   "author": {
     "name": "xiaoxiao-svg"
